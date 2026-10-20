@@ -1,0 +1,42 @@
+name: Linus
+game: Pathogenic
+description: Persistent numbered remote unlocks across repeatable runs.
+Pathogenic:
+  progression_balancing: 50  # ignored: every location is always reachable
+  accessibility: full        # ignored: native feats are optional, never logic gates
+
+  # Share deaths in both directions. Paused/editor runs die when gameplay resumes.
+  death_link: true
+
+  # where you can unlock things
+  shop_unlocks: true         # one coin pedestal in every shop
+  item_room_unlocks: true    # one free pedestal in every blue item room
+  boss_reward_unlocks: true  # one choice of every boss bodypart reward
+  level_up_unlocks: true     # last card of every level-up mutation draft
+
+  # Unlock the full roster; omit character items, shipments and Earn checks.
+  start_with_all_characters: true
+
+  # things other people can unlock
+  remote_characters: true   # ignored when start_with_all_characters is true
+  remote_plasmids: true
+  remote_loadouts: true
+  remote_organelles: true
+  remote_environment: true
+  
+  # Additional filler checks (0-10000 each):
+  # Amount of times other player can grant coins
+  coin_checks: 0
+  # Amount of coins granted by each coin check
+  coin_amount: 15
+  # Amount of times other player can grant DNA
+  dna_checks: 0
+  # Amount of DNA granted by each DNA check
+  dna_amount: 1
+  # Amount of times other player can grant plasmid fragments
+  plasmid_fragment_checks: 0
+  # Amount of plasmid fragments granted by each plasmid fragment check
+  plasmid_fragment_amount: 1
+
+  # Multiworld-run victories required in addition to sending every check (0-50).
+  required_victories: 0

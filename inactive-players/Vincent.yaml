@@ -1,0 +1,42 @@
+name: Vincent
+game: Peglin
+description: Peglin unlocks shuffled into the multiworld; remote unlocks in relic rewards, orb rewards and shops.
+Peglin:
+  progression_balancing: 50  # ignored: every location is always reachable
+  accessibility: full        # ignored: every location is always reachable
+
+  # Share deaths in both directions. Between levels the death waits until your next battle starts.
+  death_link: true
+
+  # where you can unlock things (at least one must be true)
+  reward_unlocks: true   # one choice of every relic reward (treasure chests, elites, bosses) and orb reward
+  shop_unlocks: true     # one relic slot of every shop
+
+  # things other people can unlock
+  # Balladin, Roundrel and Spinventor become items (Peglin is always playable).
+  remote_classes: true
+  # true: "Custom Start" is an item. false: the custom loadout button is available from the start.
+  remote_custom_start: true
+  # Orbs unlock Custom Start and are delivered once to your current or next multiworld run.
+  # Disabled rarities are available in Custom Start from the beginning, without a delivery.
+  remote_common_orbs: false
+  remote_uncommon_orbs: false
+  remote_rare_orbs: true
+  remote_special_orbs: true
+  remote_unavailable_orbs: false  # normally unavailable orbs
+  # Received relics unlock Custom Start and apply in every multiworld run.
+  # Disabled rarities are unlocked in Custom Start, without automatically granting them.
+  remote_common_relics: false
+  remote_rare_relics: true
+  remote_boss_relics: true
+  remote_scenario_relics: false  # scenario/event relics with no standard rarity
+  remote_unavailable_relics: false  # normally unavailable relics
+
+  # Additional filler checks (0-10000):
+  # Amount of times other players can grant gold
+  gold_checks: 0
+  # Amount of gold granted by each gold check (1-10000)
+  gold_amount: 25
+
+  # Multiworld-run victories required, in addition to sending every check, to complete your goal.
+  required_victories: 0

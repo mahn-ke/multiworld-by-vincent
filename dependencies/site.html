@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Multiworld</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#14161c; --panel:#1d2029; --line:#2c303c; --text:#e6e6e6; --dim:#9aa0ad; --prog:#c39bff; --useful:#6fb7ff; --loc:#5ee0a0; --goal:#ffcf4a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system, "Segoe UI", sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; gap:24px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:20px; }
+  .dim { color:var(--dim); }
+  code { background:#0d0f14; padding:2px 6px; border-radius:4px; }
+  main { padding:16px 24px; display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  section h2 { margin:0 0 10px; font-size:15px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+  .card { border:1px solid var(--line); border-left:5px solid var(--c); border-radius:6px; padding:10px 12px; }
+  .card b { font-size:15px; }
+  .card summary { cursor:pointer; }
+  .checklist { max-height:420px; overflow:auto; margin-top:12px; }
+  .check-row { display:flex; gap:9px; align-items:flex-start; padding:8px 0; border-bottom:1px solid var(--line); }
+  .check-row input { margin-top:5px; }
+  .check-row small { display:block; color:var(--dim); }
+  .check-row.done { opacity:.65; }
+  .warning { color:var(--goal); }
+  dialog { width:min(520px, calc(100% - 32px)); background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:24px; }
+  dialog::backdrop { background:#0009; }
+  dialog button { padding:8px 14px; cursor:pointer; }
+  .dialog-actions { display:flex; gap:12px; justify-content:flex-end; margin-top:20px; }
+  #check-error { color:#ff927e; white-space:pre-wrap; }
+  .bar { height:6px; background:#0d0f14; border-radius:3px; overflow:hidden; margin:6px 0; }
+  .bar div { height:100%; background:var(--c); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; background:#0d0f14; }
+  .pill.goal { background:var(--goal); color:#000; }
+  .tabs button { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 12px; margin-right:6px; cursor:pointer; }
+  .tabs button.on { border-color:var(--goal); color:var(--goal); }
+  #graph { overflow-x:auto; margin-top:12px; }
+  #graph svg text { font-size:12px; fill:var(--text); }
+  .node rect { rx:4; }
+  .node.found { opacity:.45; }
+  .edge { fill:none; stroke-width:1.6; opacity:.55; }
+  .hl .edge, .hl .node { opacity:.08; }
+  .hl .edge.on, .hl .node.on { opacity:1; }
+  .lists { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; margin-top:12px; }
+  .lists ul { margin:4px 0; padding-left:18px; }
+  table.m { border-collapse:collapse; }
+  table.m td, table.m th { border:1px solid var(--line); padding:3px 9px; text-align:center; }
+  #feed { max-height:260px; overflow-y:auto; font-size:13px; }
+  #feed div { padding:2px 0; border-bottom:1px solid #22252f; }
+  .k-player { font-weight:600; } .k-prog { color:var(--prog); } .k-useful { color:var(--useful); } .k-item { color:#bbb; } .k-location { color:var(--loc); }
+  #log { max-height:260px; overflow-y:auto; background:#0d0f14; padding:8px; font:12px/1.35 ui-monospace, Menlo, monospace; white-space:pre-wrap; }
+  #cmd { width:100%; background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-family:ui-monospace, Menlo, monospace; margin-top:8px; }
+  a { color:var(--useful); }
+  .two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
+  @media (max-width:900px) { .two { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Multiworld <span id="seed" class="dim"></span></h1>
+  <div>Server: <code id="addr">…</code> <span id="srv" class="pill"></span></div>
+  <div id="downloads" class="dim"></div>
+</header>
+<main>
+  <section>
+    <h2>Players</h2>
+    <div class="cards" id="cards"></div>
+  </section>
+  <section>
+    <h2>Path to the goal</h2>
+    <div class="tabs" id="tabs"></div>
+    <p class="dim" style="margin:8px 0 0">One line per player. Columns are spheres: everything in a column can be found once the earlier columns are found.
+      Each box is a progression item that player <b>receives</b>. A dot with an arrow coming from another player's line means that player has to <b>find</b> it for them. ◆ marks the goal. Found items fade out. Hover a box for details.</p>
+    <div id="graph"></div>
+    <div class="lists" id="lists"></div>
+  </section>
+  <div class="two">
+    <section><h2>Activity</h2><div id="feed"></div></section>
+    <section id="admin" hidden><h2>Server console (host only)</h2><div id="log"></div>
+      <input id="cmd" placeholder="/send Peglin Orbelisk · /send_location Peglin ... · /hint ... · /status · /forfeit ... (Enter to run)"></section>
+  </div>
+</main>
+<dialog id="unlock-dialog" aria-labelledby="unlock-title">
+  <h2 id="unlock-title">Unlock this now?</h2>
+  <p id="unlock-detail"></p>
+  <p class="warning">This permanently marks the location as found and sends its item to the receiving player.
+    Unchecking is not supported. Games may keep unlocks, items, or other effects even if server progress is reset.</p>
+  <p id="check-error" role="alert"></p>
+  <div class="dialog-actions"><button id="unlock-cancel">Cancel</button><button id="unlock-confirm">Unlock now</button></div>
+</dialog>
+<script>
+const COLORS = ["#ff7a59", "#5ec8ff", "#8be36f", "#d58cff", "#ffd25e", "#ff6fae", "#5ff0d4"];
+let graph, checks, selectedCheck, cardSignature, sendingCheck = false, status = {players:{}}, plan = "all";
+const expanded = new Set();
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const color = slot => COLORS[(slot - 1) % COLORS.length];
+const pname = slot => graph.players.find(p => p.slot == slot)?.name ?? slot;
+const pgame = slot => graph.players.find(p => p.slot == slot)?.game ?? "";
+const found = n => n.location_id != null && (status.players[n.finder]?.checked || []).includes(n.location_id);
+
+async function load() {
+  graph = await (await fetch("/api/graph")).json();
+  const response = await fetch("/api/checks");
+  if (!response.ok) throw new Error("Could not load player checks");
+  checks = await response.json();
+  $("seed").textContent = graph.seed;
+  const tabs = [["all", "Everyone's goal"], ...graph.players.map(p => [String(p.slot), `${p.name}'s goal`])];
+  $("tabs").innerHTML = tabs.map(([k, t]) => `<button data-k="${k}">${esc(t)}</button>`).join("");
+  $("tabs").onclick = e => { if (e.target.dataset.k) { plan = e.target.dataset.k; draw(); } };
+  await poll();
+  setInterval(poll, 3000);
+}
+
+async function poll() {
+  try { status = await (await fetch("/api/status")).json(); } catch { return; }
+  const s = status.server;
+  $("addr").textContent = `${s.lan}:${s.port}`;
+  $("srv").textContent = s.running ? "running" : "stopped";
+  $("downloads").innerHTML = "Downloads: " + status.downloads.map(d => `<a href="/download/${encodeURIComponent(d)}">${esc(d)}</a>`).join(" · ");
+  drawCards(); draw(); drawFeed(); drawAdmin();
+}
+
+function drawCards() {
+  const signature = JSON.stringify([status.players, status.admin, status.server.running]);
+  if (signature === cardSignature) return;
+  cardSignature = signature;
+  const scroll = new Map([...document.querySelectorAll(".checklist")].map(list => [list.dataset.slot, list.scrollTop]));
+  $("cards").innerHTML = graph.players.map(p => {
+    const st = status.players[p.slot] || {checked: []};
+    const n = st.checked.length, pct = p.locations ? 100 * n / p.locations : 0;
+    const how = p.game === "Peglin" ? `Options → Multiworld: <code>ws://${status.server.lan}:${status.server.port}</code>, slot <code>${esc(p.name)}</code>`
+      : p.game.startsWith("Pokemon") ? `Patch: <a href="/download/${encodeURIComponent(status.downloads.find(d => d.includes("_P" + p.slot + "_")) || "")}">download</a>, then BizHawk + client → <code>${status.server.lan}:${status.server.port}</code>`
+      : `Connect slot <code>${esc(p.name)}</code> to <code>${status.server.lan}:${status.server.port}</code>`;
+    const rows = (checks[p.slot] || []).map(check => {
+      const done = st.checked.includes(check.id);
+      return `<label class="check-row ${done ? "done" : ""}">
+        <input type="checkbox" data-slot="${p.slot}" data-location="${check.id}" ${done ? "checked" : ""}
+          ${done || !status.admin || !st.tracking || !status.server.running ? "disabled" : ""}
+          aria-label="${esc(check.name)}" title="${done ? "Already found. This cannot be unchecked." : "Unlock this location"}">
+        <span>${esc(check.name)}<small>${esc(check.item)} → ${esc(check.receiver)}</small></span></label>`;
+    }).join("");
+    return `<details class="card" data-slot="${p.slot}" ${expanded.has(p.slot) ? "open" : ""} style="--c:${color(p.slot)}">
+      <summary><b>${esc(p.name)}</b> <span class="dim">${esc(p.game)}</span>
+      <span class="pill ${st.status == 30 ? "goal" : ""}" style="float:right">${esc(st.status_name ?? "…")}</span>
+      <div class="bar"><div style="width:${pct}%"></div></div>
+      <div class="dim">${n} / ${p.locations} checks · ${st.received ?? 0} items received · click to expand</div></summary>
+      <div style="margin-top:4px;font-size:12px">${how}</div>
+      <p class="warning">Found checks cannot be unchecked. Games may permanently retain received items.</p>
+      ${!status.admin ? '<p class="dim">Only the host can unlock checks.</p>' : ""}
+      <div class="checklist" data-slot="${p.slot}">${rows}</div></details>`;
+  }).join("");
+  document.querySelectorAll(".card").forEach(card => card.addEventListener("toggle", () => {
+    if (!card.isConnected) return;
+    const slot = Number(card.dataset.slot);
+    if (card.open) expanded.add(slot); else expanded.delete(slot);
+  }));
+  document.querySelectorAll(".checklist").forEach(list => { list.scrollTop = scroll.get(list.dataset.slot) || 0; });
+  [...$("tabs").children].forEach(b => b.classList.toggle("on", b.dataset.k === plan));
+}
+
+$("cards").addEventListener("change", event => {
+  const input = event.target;
+  if (!input.matches('input[data-location]')) return;
+  input.checked = false;
+  const slot = Number(input.dataset.slot);
+  selectedCheck = {slot, check: checks[slot].find(check => check.id === Number(input.dataset.location))};
+  $("unlock-detail").textContent = `${pname(slot)}: ${selectedCheck.check.name}\n${selectedCheck.check.item} → ${selectedCheck.check.receiver}`;
+  $("check-error").textContent = "";
+  $("unlock-dialog").showModal();
+});
+$("unlock-cancel").onclick = () => $("unlock-dialog").close();
+$("unlock-dialog").addEventListener("cancel", event => { if (sendingCheck) event.preventDefault(); });
+$("unlock-confirm").onclick = async () => {
+  if (sendingCheck || !selectedCheck) return;
+  sendingCheck = true;
+  $("unlock-confirm").disabled = $("unlock-cancel").disabled = true;
+  $("check-error").textContent = "";
+  try {
+    const response = await fetch("/api/check", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({slot:selectedCheck.slot, location:selectedCheck.check.id})});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unlock failed");
+    $("unlock-dialog").close();
+    await poll();
+  } catch (error) {
+    $("check-error").textContent = error.message;
+  } finally {
+    sendingCheck = false;
+    $("unlock-confirm").disabled = $("unlock-cancel").disabled = false;
+  }
+};
+
+function draw() {
+  if (!graph) return;
+  [...$("tabs").children].forEach(b => b.classList.toggle("on", b.dataset.k === plan));
+  const P = graph.plans[plan], players = graph.players;
+  // Column 0 is the start; keep only spheres with visible items or a goal.
+  const goals = P.goal_sphere, targets = P.targets.map(String);
+  const cols = [{sphere: 0, nodes: []}];
+  P.spheres.forEach((sp, i) => {
+    const nodes = sp.filter(n => !n.event);
+    const hasGoal = targets.some(t => goals[t] === i + 1);
+    if (nodes.length || hasGoal) cols.push({sphere: i + 1, nodes});
+  });
+  const goalCol = t => { const g = goals[t]; if (g == null) return null;
+    let c = 0; cols.forEach((col, i) => { if (col.sphere <= g) c = i; }); return c; };
+  const NW = 200, NH = 22, GAP = 4, DX = 14, BX = 110, CW = BX + NW + 30, LABEL = 150, PAD = 14;
+  const lane = slot => players.findIndex(p => p.slot === slot);
+  // Received items stack in the receiver's line; sent items get their own dot in the finder's line,
+  // both ordered by the other end's line so the arrows run side by side instead of crossing.
+  cols.forEach(col => col.nodes.sort((a, b) => lane(a.receiver) - lane(b.receiver) || lane(a.finder) - lane(b.finder)));
+  const stack = {}, out = {};
+  cols.forEach((col, ci) => col.nodes.forEach(n => {
+    const k = n.receiver + ":" + ci; n.row = stack[k] = (stack[k] ?? -1) + 1;
+  }));
+  cols.forEach((col, ci) => [...col.nodes].filter(n => n.finder !== n.receiver)
+    .sort((a, b) => lane(a.receiver) - lane(b.receiver) || a.row - b.row)
+    .forEach(n => { const k = n.finder + ":" + ci; n.outRow = out[k] = (out[k] ?? -1) + 1; }));
+  const laneH = {}, laneY = {};
+  let y = 30;
+  players.forEach(p => {
+    let m = 1; cols.forEach((_, ci) => m = Math.max(m, (stack[p.slot + ":" + ci] ?? -1) + 1, (out[p.slot + ":" + ci] ?? -1) + 1));
+    laneH[p.slot] = m * (NH + GAP) + PAD * 2; laneY[p.slot] = y; y += laneH[p.slot];
+  });
+  const W = LABEL + cols.length * CW + 40, H = y + 10;
+  let svg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg"><defs>${players.map(p =>
+    `<marker id="ar${p.slot}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L8,4L0,8z" fill="${color(p.slot)}"/></marker>`).join("")}</defs>`;
+  players.forEach((p, i) => {
+    svg += `<rect x="0" y="${laneY[p.slot]}" width="${W}" height="${laneH[p.slot]}" fill="${i % 2 ? "#1a1d25" : "#20232d"}"/>`;
+    svg += `<rect x="0" y="${laneY[p.slot]}" width="5" height="${laneH[p.slot]}" fill="${color(p.slot)}"/>`;
+    svg += `<text x="14" y="${laneY[p.slot] + 22}" style="font-weight:600;font-size:14px">${esc(p.name)}</text>`;
+    svg += `<text x="14" y="${laneY[p.slot] + 40}" style="fill:#9aa0ad">${esc(p.game)}</text>`;
+  });
+  cols.forEach((col, ci) => svg += `<text x="${LABEL + ci * CW + DX}" y="18" style="fill:#9aa0ad">${ci === 0 ? "start" : "sphere " + col.sphere}</text>`);
+  let edges = "", dots = "", nodes = "", id = 0;
+  cols.forEach((col, ci) => col.nodes.forEach(n => {
+    const x0 = LABEL + ci * CW, x = x0 + BX, ny = laneY[n.receiver] + PAD + n.row * (NH + GAP);
+    const f = found(n), tag = `n${id++}`;
+    const tip = `${n.item} → ${pname(n.receiver)} (${pgame(n.receiver)})\nfound at ${n.location} in ${pname(n.finder)}'s ${pgame(n.finder)}\nsphere ${col.sphere}${f ? "\n✓ found" : ""}`;
+    if (n.finder !== n.receiver) {
+      const sx = x0 + DX, sy = laneY[n.finder] + PAD + n.outRow * (NH + GAP) + NH / 2, ty = ny + NH / 2, mx = (sx + x) / 2;
+      edges += `<path class="edge ${tag}" data-t="${tag}" stroke="${color(n.finder)}" marker-end="url(#ar${n.finder})" d="M${sx + 5},${sy} C${mx},${sy} ${mx},${ty} ${x - 1},${ty}"/>`;
+      dots += `<g class="node ${f ? "found" : ""} ${tag}" data-t="${tag}"><title>${esc(tip)}</title>` +
+        `<circle cx="${sx}" cy="${sy}" r="5" fill="${color(n.finder)}"/></g>`;
+    }
+    nodes += `<g class="node ${f ? "found" : ""} ${tag}" data-t="${tag}"><title>${esc(tip)}</title>` +
+      `<rect x="${x}" y="${ny}" width="${NW}" height="${NH}" fill="${color(n.finder)}33" stroke="${color(n.finder)}"/>` +
+      `<text x="${x + 7}" y="${ny + 15}">${f ? "✓ " : ""}${esc(n.item.length > 28 ? n.item.slice(0, 27) + "…" : n.item)}</text></g>`;
+  }));
+  svg += edges + dots + nodes;
+  targets.forEach(t => {
+    const c = goalCol(t);
+    const x = c == null ? null : LABEL + c * CW + (stack[t + ":" + c] != null ? BX + NW + 16 : out[t + ":" + c] != null ? 40 : DX + 4);
+    const cy = laneY[t] + laneH[t] / 2, done = status.players[t]?.status == 30;
+    svg += c == null ? `<text x="${LABEL + 20}" y="${cy + 4}" style="fill:#ff7a7a">goal not reachable</text>`
+      : `<g><title>${esc(pname(t))}'s goal${done ? " ✓ reached" : ""}</title><path d="M${x},${cy - 10}L${x + 10},${cy}L${x},${cy + 10}L${x - 10},${cy}z" fill="${done ? "#ffcf4a" : "none"}" stroke="#ffcf4a" stroke-width="2"/>` +
+        `<text x="${x + 14}" y="${cy + 4}" style="fill:#ffcf4a">goal</text></g>`;
+  });
+  $("graph").innerHTML = svg + "</svg>";
+  const root = $("graph").firstChild;
+  root.onmouseover = e => { const g = e.target.closest("[data-t]"); if (!g) return;
+    root.classList.add("hl"); root.querySelectorAll("." + g.dataset.t).forEach(el => el.classList.add("on")); };
+  root.onmouseout = () => { root.classList.remove("hl"); root.querySelectorAll(".on").forEach(el => el.classList.remove("on")); };
+  drawLists(P, players, targets);
+}
+
+function drawLists(P, players, targets) {
+  const all = P.spheres.flatMap((sp, i) => sp.filter(n => !n.event).map(n => ({...n, sphere: i + 1})));
+  const m = {};
+  all.forEach(n => { m[n.finder + ">" + n.receiver] = (m[n.finder + ">" + n.receiver] || 0) + 1; });
+  let html = `<div><b>Who finds what for whom</b> <span class="dim">(rows find, columns receive)</span><table class="m"><tr><th></th>${players.map(p => `<th style="color:${color(p.slot)}">${esc(p.name)}</th>`).join("")}</tr>` +
+    players.map(f => `<tr><th style="color:${color(f.slot)}">${esc(f.name)}</th>${players.map(r => `<td>${m[f.slot + ">" + r.slot] || ""}</td>`).join("")}</tr>`).join("") + "</table></div>";
+  const open = all.filter(n => !found(n));
+  const next = open.length ? open.filter(n => n.sphere === Math.min(...open.map(o => o.sphere))) : [];
+  html += `<div><b>Up next</b> <span class="dim">(earliest still-missing items on this path)</span><ul>` +
+    (next.length ? next.map(n => `<li><span style="color:${color(n.finder)}">${esc(pname(n.finder))}</span> checks <span class="k-location">${esc(n.location)}</span> → <span class="k-prog">${esc(n.item)}</span> for <span style="color:${color(n.receiver)}">${esc(pname(n.receiver))}</span></li>`).join("")
+      : "<li>Nothing left. Every listed item has been found.</li>") + "</ul></div>";
+  html += `<div><b>Remaining per player</b><ul>` + players.map(p => {
+    const need = all.filter(n => n.receiver === p.slot), left = need.filter(n => !found(n));
+    const from = {}; left.forEach(n => from[n.finder] = (from[n.finder] || 0) + 1);
+    const g = P.goal_sphere[p.slot];
+    return `<li><span style="color:${color(p.slot)}">${esc(p.name)}</span>: needs ${need.length} item(s), ${left.length} still missing` +
+      (left.length ? " (" + Object.entries(from).map(([s, c]) => `${c} from ${esc(pname(+s))}`).join(", ") + ")" : "") +
+      (targets.includes(String(p.slot)) ? (g == null ? " · goal unreachable" : g === 0 ? " · goal needs no items" : "") : " · not a target of this view") + "</li>";
+  }).join("") + "</ul></div>";
+  $("lists").innerHTML = html;
+}
+
+function drawFeed() {
+  const box = $("feed"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 5;
+  box.innerHTML = status.feed.map(f => `<div><span class="dim">${new Date(f.time * 1000).toLocaleTimeString()}</span> ` +
+    f.parts.map(p => `<span class="k-${p.k}"${p.slot ? ` style="color:${color(p.slot)}"` : ""}>${esc(p.t)}</span>`).join("") + "</div>").join("") || '<span class="dim">Nothing yet.</span>';
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+function drawAdmin() {
+  if (!status.admin) return;
+  $("admin").hidden = false;
+  const box = $("log"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 5;
+  box.textContent = status.log.join("\n");
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+$("cmd").onkeydown = async e => {
+  if (e.key !== "Enter" || !e.target.value.trim()) return;
+  await fetch("/api/command", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({command: e.target.value})});
+  e.target.value = ""; setTimeout(poll, 400);
+};
+load();
+</script>
+</body>
+</html>

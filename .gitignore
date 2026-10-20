@@ -1,0 +1,14 @@
+# Local runtime and generated campaign state
+/.cache/
+/runs/
+/latest.json
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
