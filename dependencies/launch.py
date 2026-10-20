@@ -18,6 +18,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPS = ROOT / "dependencies"
+SETTINGS_FILE = "room-settings.json"
 
 
 def player_files(root: Path) -> list[Path]:
@@ -103,7 +104,35 @@ def sync_worlds(engine: Path) -> None:
         shutil.copy2(source, custom / source.name)
 
 
-def generate(python: Path, engine: Path, files: list[Path], environment: dict[str, str]) -> Path:
+def room_settings() -> dict:
+    """Room-wide generation settings edited from the website (room-settings.json beside start.sh)."""
+    settings = {"prefer_other_players": True}
+    path = ROOT / SETTINGS_FILE
+    if path.is_file():
+        try:
+            stored = json.loads(path.read_text())
+        except ValueError as error:
+            raise ValueError(f"{path} is not valid JSON: {error}") from error
+        if isinstance(stored, dict) and isinstance(stored.get("prefer_other_players"), bool):
+            settings["prefer_other_players"] = stored["prefer_other_players"]
+    return settings
+
+
+def save_room_settings(settings: dict) -> None:
+    (ROOT / SETTINGS_FILE).write_text(json.dumps(settings, indent=2) + "\n")
+
+
+def generate(python: Path, engine: Path, files: list[Path], environment: dict[str, str], **options) -> Path:
+    return generate_inputs(python, engine, [(path.name, path.read_bytes()) for path in files], environment, **options)
+
+
+def generate_inputs(python: Path, engine: Path, inputs: list[tuple[str, bytes]], environment: dict[str, str],
+                    on_line=None, on_process=None, prefer_other_players: bool | None = None) -> Path:
+    """Generates a new seed from (file name, YAML bytes) pairs. Output lines are streamed to `on_line`."""
+    if not inputs:
+        raise ValueError("At least one player is required.")
+    if prefer_other_players is None:
+        prefer_other_players = room_settings()["prefer_other_players"]
     runs = ROOT / "runs"
     runs.mkdir(exist_ok=True)
     run = runs / (datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8])
@@ -111,20 +140,34 @@ def generate(python: Path, engine: Path, files: list[Path], environment: dict[st
     players.mkdir(parents=True)
     output = run / "output"
     output.mkdir()
-    for index, source in enumerate(files):
+    for index, (source, content) in enumerate(inputs):
         # Archipelago ignores dotfiles; include explicitly supplied hidden YAMLs too.
-        name = f"{index}-{source.name}" if source.name.startswith(".") else source.name
-        shutil.copy2(source, players / name)
-    print(f"Generating a NEW seed from {len(files)} YAML file(s):", flush=True)
-    for source in files:
-        print(f"  {source.name}", flush=True)
-    command = [str(python), str(DEPS / "spoiler_graph.py"), str(players), str(output)]
+        name = f"{index}-{source}" if source.startswith(".") else source
+        (players / name).write_bytes(content)
+    print(f"Generating a NEW seed from {len(inputs)} YAML file(s):", flush=True)
+    for source, _content in inputs:
+        print(f"  {source}", flush=True)
+    if prefer_other_players:
+        print("Preferring checks that unlock items for other players.", flush=True)
+    command = [str(python), str(DEPS / "spoiler_graph.py")]
+    if not prefer_other_players:
+        command.append("--allow-self-checks")
+    command += [str(players), str(output)]
     log_path = run / "generation.log"
     with log_path.open("w") as log:
-        result = subprocess.run(command, cwd=engine, env=environment, stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=subprocess.STDOUT)
-    if result.returncode:
-        print(log_path.read_text()[-12000:], file=sys.stderr)
+        process = subprocess.Popen(command, cwd=engine, env=environment, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, errors="replace", bufsize=1)
+        if on_process:
+            on_process(process)
+        for line in process.stdout:
+            log.write(line)
+            if on_line:
+                on_line(line.rstrip("\n"))
+        returncode = process.wait()
+    if returncode:
+        if not on_line:
+            print(log_path.read_text()[-12000:], file=sys.stderr)
         raise RuntimeError(f"Generation failed. Full log: {log_path}")
     archives = list(output.glob("AP_*.zip"))
     if len(archives) != 1 or not archives[0].with_suffix(".graph.json").is_file():
@@ -134,7 +177,7 @@ def generate(python: Path, engine: Path, files: list[Path], environment: dict[st
         raise RuntimeError("Refusing a seed that already has saved progress.")
     (ROOT / "latest.json").write_text(json.dumps({
         "campaign": str(campaign.relative_to(ROOT)),
-        "players": [path.name for path in files],
+        "players": [source for source, _content in inputs],
     }, indent=2) + "\n")
     return campaign
 

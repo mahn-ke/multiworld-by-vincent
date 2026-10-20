@@ -13,6 +13,23 @@ launch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launch)
 
 
+class FakeProcess:
+    """Stands in for the generator subprocess: runs `effect(command)` and streams `lines`."""
+
+    def __init__(self, command, effect=None, returncode=0, lines=("progress line\n",), **kwargs):
+        self.command, self.kwargs, self.returncode = command, kwargs, returncode
+        if effect:
+            effect(command, **kwargs)
+        self.stdout = iter(lines)
+
+    def wait(self):
+        return self.returncode
+
+
+def fake_popen(effect=None, returncode=0):
+    return lambda command, **kwargs: FakeProcess(command, effect, returncode, **kwargs)
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="multiworld tests ")
@@ -78,9 +95,8 @@ class LauncherTests(unittest.TestCase):
             (output / "AP_123.graph.json").write_text("{}")
             self.assertEqual(kwargs["cwd"], self.engine)
             self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
-            return subprocess.CompletedProcess(command, 0)
 
-        with patch.object(launch.subprocess, "run", side_effect=generate):
+        with patch.object(launch.subprocess, "Popen", side_effect=fake_popen(generate)):
             first = launch.generate(Path("python"), self.engine, inputs, self.environment)
             second = launch.generate(Path("python"), self.engine, inputs, self.environment)
         self.assertNotEqual(first, second)
@@ -96,11 +112,38 @@ class LauncherTests(unittest.TestCase):
         source = self.root / "a.yaml"
         source.touch()
         for returncode in (0, 1):
-            with patch.object(launch.subprocess, "run",
-                              return_value=subprocess.CompletedProcess([], returncode)):
+            with patch.object(launch.subprocess, "Popen", side_effect=fake_popen(returncode=returncode)):
                 with self.assertRaises(RuntimeError):
                     launch.generate(Path("python"), self.engine, [source], {})
         self.assertFalse((self.root / "latest.json").exists())
+
+    def test_streams_output_and_prefers_other_players_by_default(self):
+        commands, lines = [], []
+
+        def generate(command, **kwargs):
+            commands.append(command)
+            output = Path(command[-1])
+            (output / "AP_9.zip").touch()
+            (output / "AP_9.graph.json").write_text("{}")
+
+        inputs = [("b.yaml", b"name: B"), ("a.yaml", b"name: A")]
+        with patch.object(launch.subprocess, "Popen", side_effect=fake_popen(generate)):
+            campaign = launch.generate_inputs(Path("python"), self.engine, inputs, {}, on_line=lines.append)
+            self.assertEqual(lines, ["progress line"])
+            self.assertNotIn("--allow-self-checks", commands[-1])
+            self.assertEqual((campaign.parent.parent / "players" / "b.yaml").read_bytes(), b"name: B")
+            self.assertIn("progress line", (campaign.parent.parent / "generation.log").read_text())
+            launch.save_room_settings({"prefer_other_players": False})
+            launch.generate_inputs(Path("python"), self.engine, inputs, {})
+            self.assertIn("--allow-self-checks", commands[-1])
+            launch.generate_inputs(Path("python"), self.engine, inputs, {}, prefer_other_players=True)
+            self.assertNotIn("--allow-self-checks", commands[-1])
+
+    def test_room_settings_default_and_validation(self):
+        self.assertEqual(launch.room_settings(), {"prefer_other_players": True})
+        (self.root / launch.SETTINGS_FILE).write_text("{broken")
+        with self.assertRaisesRegex(ValueError, "not valid JSON"):
+            launch.room_settings()
 
     def test_room_failure_propagates(self):
         args = argparse.Namespace(web_port=8085, ap_port=38285)

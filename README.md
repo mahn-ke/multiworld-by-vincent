@@ -39,6 +39,35 @@ PYTHON=python3.13 ./start.sh
 ./start.sh --generate-only
 ```
 
+### Edit mode (new seed without restarting)
+
+On localhost, the website has an **Edit players & settings** button. There you
+can rename players, pick each player's game from the installed games, change
+that game's settings (hover over a setting for its description), and add or
+remove players. **Save & start new seed…** warns that this resets progress,
+randomizes items and requires players to reconnect. After you confirm:
+
+1. The new seed generates while the current game server keeps running.
+   Progress and the generation log stream live over a WebSocket (`/ws`).
+   If generation fails, nothing changes and the error is shown.
+2. The YAMLs beside `start.sh` and `room-settings.json` are updated. Edited
+   YAMLs are rewritten without their comments. Removed players are moved to
+   `inactive-players/`.
+3. The old game server stops and the new one starts on the same port. Open
+   pages reload to the new seed automatically.
+
+YAMLs with several documents or weighted names/games can only be kept or
+removed in the editor. Edit those files by hand.
+
+### Checks for other players (on by default)
+
+After the normal fill, items are swapped between worlds so that a check unlocks
+something for **another** player whenever possible. Every game rule is
+respected and the seed stays beatable. Locked locations and players with many
+more locations than everyone else keep some of their own items. Turn this off
+with the editor's checkbox, or set `"prefer_other_players": false` in
+`room-settings.json` beside `start.sh`.
+
 The host's console and check buttons are only available through localhost.
 The website, spoiler and tracker are visible to anyone who can reach its port.
 Only host on a trusted network.

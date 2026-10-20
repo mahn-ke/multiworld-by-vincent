@@ -55,6 +55,36 @@
   a { color:var(--useful); }
   .two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
   @media (max-width:900px) { .two { grid-template-columns:1fr; } }
+  button.act { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 14px; cursor:pointer; }
+  button.act.primary { border-color:var(--goal); color:var(--goal); }
+  button.act:disabled { opacity:.5; cursor:default; }
+  button.link { background:none; border:0; color:var(--useful); cursor:pointer; padding:0 4px; font-size:12px; }
+  #room { border-color:var(--useful); }
+  #room.error { border-color:#ff927e; }
+  #room .bar div { background:var(--useful); transition:width .3s; }
+  #room-error { color:#ff927e; white-space:pre-wrap; font:12px/1.35 ui-monospace, Menlo, monospace; max-height:220px; overflow:auto; }
+  #gen-log { max-height:180px; overflow-y:auto; background:#0d0f14; padding:8px; font:12px/1.35 ui-monospace, Menlo, monospace; white-space:pre-wrap; margin:8px 0 0; }
+  main.editing > :not(#editor):not(#room) { display:none; }
+  .toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .toolbar .grow { flex:1; }
+  .ed-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(380px,1fr)); gap:12px; margin-top:12px; }
+  .ed-card { border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
+  .ed-card.removed { opacity:.55; }
+  .ed-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .ed-head input, .ed-head select, .opt input, .opt select, .opt textarea { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:4px 6px; font:inherit; }
+  .ed-head input { width:150px; }
+  .ed-head select { max-width:220px; }
+  .opt { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.1fr) 44px; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid #22252f; }
+  .opt label { cursor:help; }
+  .opt.changed label { color:var(--goal); }
+  .opt input[type=number] { width:110px; }
+  .opt select { max-width:100%; }
+  .opt textarea { width:100%; min-height:54px; font:12px ui-monospace, Menlo, monospace; }
+  .opt .bad { border-color:#ff927e; }
+  .opt .pair { display:flex; gap:6px; }
+  .ed-card h4 { margin:10px 0 2px; font-size:12px; text-transform:uppercase; color:var(--dim); letter-spacing:.05em; }
+  .ed-card details > summary { cursor:pointer; margin-top:8px; }
+  .ed-error { color:#ff927e; }
 </style>
 </head>
 <body>
@@ -62,8 +92,32 @@
   <h1>Multiworld <span id="seed" class="dim"></span></h1>
   <div>Server: <code id="addr">…</code> <span id="srv" class="pill"></span></div>
   <div id="downloads" class="dim"></div>
+  <div style="margin-left:auto"><button id="edit-open" class="act" hidden>Edit players &amp; settings</button></div>
 </header>
-<main>
+<main id="main">
+  <section id="room" hidden>
+    <h2 id="room-title">Room</h2>
+    <div id="room-message"></div>
+    <div class="bar"><div id="room-progress" style="width:0"></div></div>
+    <div id="room-error"></div>
+    <details id="gen-log-box" hidden><summary class="dim">Generation log</summary><pre id="gen-log"></pre></details>
+    <div class="dialog-actions" style="margin-top:8px"><button id="room-dismiss" class="act" hidden>Dismiss</button></div>
+  </section>
+  <section id="editor" hidden>
+    <h2>Edit players &amp; settings</h2>
+    <div class="toolbar">
+      <label title="After the normal fill, items are swapped between worlds (respecting every game rule and keeping the seed beatable) so a check unlocks something for another player whenever possible. Players with many more locations than everyone else still keep some of their own items."><input type="checkbox" id="prefer-others" checked>
+        Checks unlock items for <b>other players</b> whenever possible</label>
+      <span class="grow"></span>
+      <button id="ed-add" class="act">+ Add player</button>
+      <button id="ed-cancel" class="act">Cancel</button>
+      <button id="ed-save" class="act primary">Save &amp; start new seed…</button>
+    </div>
+    <p class="dim" style="margin:8px 0 0">Changes are written to the player YAMLs beside <code>start.sh</code> only after the new seed generated successfully.
+      Edited files are rewritten without their comments. Removed players are moved to <code>inactive-players/</code>. Hover a setting for its description.</p>
+    <p id="ed-error" class="ed-error" role="alert"></p>
+    <fieldset id="ed-fields" style="border:0;padding:0;margin:0"><div class="ed-cards" id="ed-cards"></div></fieldset>
+  </section>
   <section>
     <h2>Players</h2>
     <div class="cards" id="cards"></div>
@@ -90,6 +144,12 @@
   <p id="check-error" role="alert"></p>
   <div class="dialog-actions"><button id="unlock-cancel">Cancel</button><button id="unlock-confirm">Unlock now</button></div>
 </dialog>
+<dialog id="regen-dialog" aria-labelledby="regen-title">
+  <h2 id="regen-title">Start a new seed?</h2>
+  <p class="warning">This will reset progress, randomize items and require players to reconnect.</p>
+  <p class="dim">The current game server keeps running while the new seed generates. If generation fails, nothing changes.</p>
+  <div class="dialog-actions"><button id="regen-cancel">Cancel</button><button id="regen-confirm">Reset &amp; randomize</button></div>
+</dialog>
 <script>
 const COLORS = ["#ff7a59", "#5ec8ff", "#8be36f", "#d58cff", "#ffd25e", "#ff6fae", "#5ff0d4"];
 let graph, checks, selectedCheck, cardSignature, sendingCheck = false, status = {players:{}}, plan = "all";
@@ -101,24 +161,45 @@ const pname = slot => graph.players.find(p => p.slot == slot)?.name ?? slot;
 const pgame = slot => graph.players.find(p => p.slot == slot)?.game ?? "";
 const found = n => n.location_id != null && (status.players[n.finder]?.checked || []).includes(n.location_id);
 
-async function load() {
-  graph = await (await fetch("/api/graph")).json();
+async function loadSeed() {
+  const nextGraph = await (await fetch("/api/graph")).json();
   const response = await fetch("/api/checks");
   if (!response.ok) throw new Error("Could not load player checks");
   checks = await response.json();
+  if (graph && graph.seed !== nextGraph.seed) { expanded.clear(); selectedCheck = null; }
+  graph = nextGraph;
+  if (!graph.plans[plan]) plan = "all";
+  cardSignature = null;
   $("seed").textContent = graph.seed;
   const tabs = [["all", "Everyone's goal"], ...graph.players.map(p => [String(p.slot), `${p.name}'s goal`])];
   $("tabs").innerHTML = tabs.map(([k, t]) => `<button data-k="${k}">${esc(t)}</button>`).join("");
+}
+
+async function load() {
   $("tabs").onclick = e => { if (e.target.dataset.k) { plan = e.target.dataset.k; draw(); } };
+  await loadSeed();
+  connectSocket();
   await poll();
   setInterval(poll, 3000);
 }
 
+let reloading = null;
+function reloadSeed() {
+  reloading ??= loadSeed().then(() => { reloading = null; return poll(); }, () => { reloading = null; });
+  return reloading;
+}
+
 async function poll() {
-  try { status = await (await fetch("/api/status")).json(); } catch { return; }
+  let next;
+  try { next = await (await fetch("/api/status")).json(); } catch { return; }
+  if (next.room) showRoom(next.room);
+  if (next.server.seed !== graph.seed) return reloadSeed();
+  status = next;
   const s = status.server;
   $("addr").textContent = `${s.lan}:${s.port}`;
-  $("srv").textContent = s.running ? "running" : "stopped";
+  const phase = status.room?.phase;
+  $("srv").textContent = phase && phase !== "running" && phase !== "error" ? phase + "…" : s.running ? "running" : "stopped";
+  $("edit-open").hidden = !status.admin;
   $("downloads").innerHTML = "Downloads: " + status.downloads.map(d => `<a href="/download/${encodeURIComponent(d)}">${esc(d)}</a>`).join(" · ");
   drawCards(); draw(); drawFeed(); drawAdmin();
 }
@@ -180,7 +261,7 @@ $("unlock-confirm").onclick = async () => {
   $("check-error").textContent = "";
   try {
     const response = await fetch("/api/check", {method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({slot:selectedCheck.slot, location:selectedCheck.check.id})});
+      body:JSON.stringify({slot:selectedCheck.slot, location:selectedCheck.check.id, seed:graph.seed})});
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Unlock failed");
     $("unlock-dialog").close();
@@ -309,6 +390,294 @@ $("cmd").onkeydown = async e => {
   await fetch("/api/command", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({command: e.target.value})});
   e.target.value = ""; setTimeout(poll, 400);
 };
+// ---- Room lifecycle (WebSocket /ws pushes state, generation log lines and "reload" when a new seed runs)
+let roomState = null, awaiting = null, showSuccess = false;
+
+function connectSocket() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onmessage = event => {
+    const message = JSON.parse(event.data);
+    if (message.type === "state") showRoom(message);
+    else if (message.type === "log") appendLog(message.lines);
+    else if (message.type === "reload") { showSuccess = true; reloadSeed(); }
+  };
+  ws.onclose = () => setTimeout(connectSocket, 2000);
+}
+
+function appendLog(lines) {
+  if (!lines.length && !$("gen-log").textContent) return;
+  const box = $("gen-log"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 5;
+  box.textContent = (box.textContent ? box.textContent + "\n" : "") + lines.join("\n");
+  if (box.textContent.length > 200000) box.textContent = box.textContent.slice(-150000);
+  $("gen-log-box").hidden = false;
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+function showRoom(state) {
+  const previous = roomState;
+  roomState = state;
+  if (state.busy && previous && !previous.busy) { $("gen-log").textContent = ""; showSuccess = false; }
+  if (awaiting === "pending" && state.busy) awaiting = "running";
+  if (awaiting === "running" && !state.busy) finishSave(state);
+  const titles = {generating: "Generating a new seed", stopping: "Stopping the previous game server",
+    starting: "Starting the new game server", error: "Problem", running: "Room"};
+  const visible = state.busy || state.error || state.phase !== "running" || showSuccess;
+  $("room").hidden = !visible;
+  $("room").classList.toggle("error", !!state.error);
+  $("room-title").textContent = titles[state.phase] || state.phase;
+  $("room-message").textContent = state.message || "";
+  $("room-progress").style.width = `${Math.round(100 * (state.busy || showSuccess ? state.progress : 0))}%`;
+  $("room-progress").parentElement.hidden = !(state.busy || showSuccess);
+  $("room-error").textContent = state.error || "";
+  $("room-dismiss").hidden = state.busy;
+  $("ed-save").disabled = state.busy;
+}
+
+$("room-dismiss").onclick = () => { showSuccess = false; $("room").hidden = true; if (roomState) roomState = {...roomState, error: null}; };
+
+function finishSave(state) {
+  awaiting = null;
+  $("ed-fields").disabled = false;
+  if (state.phase === "running" && !state.error) { closeEditor(); showSuccess = true; reloadSeed(); }
+  else $("ed-error").textContent = "Not saved. See the message above, fix the settings and try again.";
+}
+
+// ---- Edit mode: player names, games and each player's game settings
+let editor = null;
+const schemas = {}, schemaRequests = {};
+
+async function getJSON(url) {
+  const response = await fetch(url);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || `Request failed: ${url}`);
+  return body;
+}
+
+async function schemaFor(game) {
+  if (!game) return null;
+  schemaRequests[game] ??= getJSON("/api/options?game=" + encodeURIComponent(game))
+    .catch(error => ({error: error.message})).then(schema => schemas[game] = schema);
+  return schemaRequests[game];
+}
+
+$("edit-open").onclick = async () => {
+  $("main").classList.add("editing");
+  $("editor").hidden = false;
+  $("ed-error").textContent = "";
+  $("ed-cards").innerHTML = '<p class="dim">Loading players and game settings… (the first time this reads every installed game and can take a few seconds)</p>';
+  try {
+    const [config, games] = await Promise.all([getJSON("/api/config"), getJSON("/api/games")]);
+    editor = {games, players: config.players.map(p => ({...p, origGame: p.game, origName: p.name, set: {}, unset: new Set(),
+      remove: false, isNew: false, open: true}))};
+    $("prefer-others").checked = config.prefer_other_players;
+    await Promise.all(editor.players.map(p => p.editable && schemaFor(p.game)));
+    renderEditor();
+  } catch (error) {
+    $("ed-cards").innerHTML = "";
+    $("ed-error").textContent = error.message;
+  }
+};
+
+function closeEditor() {
+  editor = null;
+  $("editor").hidden = true;
+  $("main").classList.remove("editing");
+  cardSignature = null;
+  poll();
+}
+$("ed-cancel").onclick = closeEditor;
+
+$("ed-add").onclick = async () => {
+  if (!editor) return;
+  const game = editor.players.find(p => p.editable && !p.remove)?.game || editor.games[0];
+  editor.players.push({file: null, editable: true, name: "", game, origGame: null, options: {}, set: {}, unset: new Set(),
+    remove: false, isNew: true, open: true});
+  await schemaFor(game);
+  renderEditor();
+  $("ed-cards").lastElementChild?.querySelector("input[data-name]")?.focus();
+};
+
+const isOverridden = (p, name) => name in p.set || (p.game === p.origGame && name in p.options && !p.unset.has(name));
+function effective(p, o) {
+  if (o.name in p.set) return p.set[o.name];
+  if (p.game === p.origGame && o.name in p.options && !p.unset.has(o.name)) return p.options[o.name];
+  return o.default;
+}
+
+function widget(o, v, attrs) {
+  const lower = String(v).toLowerCase();
+  if (o.kind === "toggle" && (typeof v === "boolean" || v === 0 || v === 1 || ["true", "false", "on", "off", "yes", "no"].includes(lower)))
+    return `<input type="checkbox" ${attrs} data-w="toggle" ${v === true || v === 1 || ["true", "on", "yes"].includes(lower) ? "checked" : ""}>`;
+  if (o.kind === "choice" && typeof v === "string" && o.choices.some(c => c.key === lower))
+    return `<select ${attrs} data-w="choice">${o.choices.map(c => `<option value="${esc(c.key)}" ${c.key === lower ? "selected" : ""}>${esc(c.label)}</option>`).join("")}</select>`;
+  if (o.kind === "textchoice" && (typeof v === "string" || typeof v === "number")) {
+    const list = `dl-${o.name}`;
+    return `<input ${attrs} data-w="text" list="${esc(list)}" value="${esc(v)}"><datalist id="${esc(list)}">${o.choices.map(c => `<option value="${esc(c.key)}">`).join("")}</datalist>`;
+  }
+  const specials = Object.entries(o.special || {});
+  if (o.kind === "range" && (typeof v === "number" || /^-?\d+$/.test(String(v)) || specials.some(([k]) => k === lower))) {
+    const special = specials.find(([k, n]) => k === lower || n === Number(v));
+    const number = special ? special[1] : Number(v);
+    const select = specials.length ? `<select ${attrs.replace(/ id="[^"]*"/, "")} data-w="special" aria-label="${esc(o.display)} preset"><option value="">custom</option>${specials.map(([k]) =>
+      `<option value="${esc(k)}" ${special?.[0] === k ? "selected" : ""}>${esc(k.replaceAll("_", " "))}</option>`).join("")}</select>` : "";
+    return `<span class="pair"><input type="number" ${attrs} data-w="number" min="${o.min}" max="${o.max}" value="${number}">${select}</span>`;
+  }
+  if (o.kind === "text" && (typeof v === "string" || typeof v === "number"))
+    return `<input ${attrs} data-w="text" value="${esc(v)}">`;
+  const hint = o.suggestions?.length ? ` title="Known values: ${esc(o.suggestions.slice(0, 60).join(", "))}${o.suggestions.length > 60 ? ", …" : ""}"` : "";
+  return `<textarea ${attrs} data-w="json" spellcheck="false"${hint}>${esc(JSON.stringify(v ?? null, null, 1))}</textarea>`;
+}
+
+function optionRows(p, index, options) {
+  return options.map(o => {
+    const attrs = `data-p="${index}" data-opt="${esc(o.name)}" id="opt-${index}-${esc(o.name)}"`;
+    const doc = o.doc ? `${o.display}\n\n${o.doc}` : o.display;
+    return `<div class="opt ${isOverridden(p, o.name) ? "changed" : ""}"><label for="opt-${index}-${esc(o.name)}" title="${esc(doc)}">${esc(o.display)}</label>` +
+      `${widget(o, effective(p, o), attrs)}` +
+      (isOverridden(p, o.name) ? `<button class="link" data-reset="${index}" data-opt="${esc(o.name)}" title="Use the game's default">reset</button>` : "<span></span>") + "</div>";
+  }).join("");
+}
+
+function settingsHTML(p, index) {
+  const schema = schemas[p.game];
+  if (!schema) return '<p class="dim">Loading settings…</p>';
+  if (schema.error) return `<p class="ed-error">${esc(schema.error)}</p>`;
+  const advanced = o => !o.simple || ["set", "list", "dict", "raw"].includes(o.kind);
+  const groups = {};
+  schema.options.filter(o => !advanced(o)).forEach(o => (groups[o.group] ??= []).push(o));
+  const extra = schema.options.filter(advanced);
+  const known = new Set(schema.options.map(o => o.name));
+  const unknown = p.game === p.origGame ? Object.keys(p.options).filter(k => !known.has(k)) : [];
+  return Object.entries(groups).map(([group, options]) => `<h4>${esc(group)}</h4>${optionRows(p, index, options)}`).join("") +
+    (extra.length ? `<details ${p.openAdvanced ? "open" : ""} data-advanced="${index}"><summary class="dim">Advanced (${extra.length}): item/location lists, start inventory, links…</summary>${optionRows(p, index, extra)}</details>` : "") +
+    (unknown.length ? `<p class="dim">Kept as written in the file: ${unknown.map(esc).join(", ")}</p>` : "");
+}
+
+function nameProblem(p) {
+  const name = p.name.trim();
+  if (!name) return "Name is required.";
+  if (name.length > 16) return "Names can have at most 16 characters.";
+  if (editor.players.some(o => o !== p && !o.remove && o.editable && o.name.trim().toLowerCase() === name.toLowerCase())) return "Another player has this name.";
+  return "";
+}
+
+function cardHTML(p, index) {
+  const label = p.file ? esc(p.file) : "new file";
+  if (p.remove) return `<div class="ed-card removed" id="ed-card-${index}"><div class="ed-head"><b>${esc(p.name || p.file)}</b>
+    <span class="dim">will be moved to inactive-players/</span><span style="flex:1"></span><button class="link" data-undo="${index}">undo</button></div></div>`;
+  if (!p.editable) return `<div class="ed-card" id="ed-card-${index}"><div class="ed-head"><b>${esc(p.name || p.file)}</b> <span class="dim">${esc(p.game)} · ${label}</span>
+    <span style="flex:1"></span><button class="link" data-remove="${index}">remove</button></div><p class="dim">${esc(p.reason || "")} It is used unchanged.</p></div>`;
+  const games = editor.games.includes(p.game) || !p.game ? editor.games : [p.game, ...editor.games];
+  const problem = nameProblem(p);
+  return `<div class="ed-card" id="ed-card-${index}" style="--c:${color(index + 1)}">
+    <div class="ed-head"><input data-name="${index}" value="${esc(p.name)}" maxlength="16" placeholder="Player name" aria-label="Player name">
+      <select data-game="${index}" aria-label="Game">${games.map(g => `<option ${g === p.game ? "selected" : ""}>${esc(g)}${editor.games.includes(g) ? "" : " (not installed)"}</option>`).join("")}</select>
+      <span class="dim">${label}</span><span style="flex:1"></span><button class="link" data-remove="${index}">remove</button></div>
+    <div class="ed-error" data-problem="${index}">${esc(problem)}</div>
+    ${p.origGame && p.game !== p.origGame ? `<p class="warning">Switching from ${esc(p.origGame)} discards that game's settings in this file.</p>` : ""}
+    <details ${p.open ? "open" : ""} data-open="${index}"><summary>Settings for ${esc(p.game)}</summary>${settingsHTML(p, index)}</details></div>`;
+}
+
+function renderEditor() {
+  $("ed-cards").innerHTML = editor.players.map(cardHTML).join("") || '<p class="dim">No players. Add one.</p>';
+}
+function renderCard(index) {
+  const card = $(`ed-card-${index}`);
+  if (card) card.outerHTML = cardHTML(editor.players[index], index);
+}
+
+$("ed-cards").addEventListener("toggle", event => {
+  const el = event.target;
+  if (el.dataset.open) editor.players[+el.dataset.open].open = el.open;
+  if (el.dataset.advanced) editor.players[+el.dataset.advanced].openAdvanced = el.open;
+}, true);
+
+$("ed-cards").addEventListener("input", event => {
+  const el = event.target;
+  if (el.dataset.name === undefined) return;
+  const p = editor.players[+el.dataset.name];
+  p.name = el.value;
+  editor.players.forEach((o, i) => { const box = document.querySelector(`[data-problem="${i}"]`); if (box) box.textContent = nameProblem(o); });
+});
+
+$("ed-cards").addEventListener("change", async event => {
+  const el = event.target;
+  if (el.dataset.game !== undefined) {
+    const index = +el.dataset.game, p = editor.players[index];
+    p.game = el.value.replace(/ \(not installed\)$/, "");
+    p.set = {}; p.unset = new Set();
+    renderCard(index);
+    await schemaFor(p.game);
+    renderCard(index);
+    return;
+  }
+  if (!el.dataset.opt || el.dataset.p === undefined) return;
+  const index = +el.dataset.p, p = editor.players[index];
+  let value;
+  switch (el.dataset.w) {
+    case "toggle": value = el.checked; break;
+    case "number": if (el.value === "") return; value = Number(el.value); break;
+    case "special": if (!el.value) return; value = el.value; break;
+    case "json":
+      try { value = JSON.parse(el.value); } catch { el.classList.add("bad"); return; }
+      el.classList.remove("bad"); break;
+    default: value = el.value;
+  }
+  p.set[el.dataset.opt] = value;
+  p.unset.delete(el.dataset.opt);
+  renderCard(index);
+});
+
+$("ed-cards").addEventListener("click", event => {
+  const el = event.target, data = el.dataset;
+  if (data.reset !== undefined) {
+    const p = editor.players[+data.reset];
+    delete p.set[data.opt];
+    if (p.game === p.origGame && data.opt in p.options) p.unset.add(data.opt);
+    renderCard(+data.reset);
+  } else if (data.remove !== undefined) {
+    const p = editor.players[+data.remove];
+    if (p.isNew) editor.players.splice(+data.remove, 1); else p.remove = true;
+    renderEditor();
+  } else if (data.undo !== undefined) {
+    editor.players[+data.undo].remove = false;
+    renderEditor();
+  }
+});
+
+$("ed-save").onclick = () => {
+  if (!editor) return;
+  $("ed-error").textContent = "";
+  const active = editor.players.filter(p => !p.remove);
+  const problem = active.filter(p => p.editable).map(p => nameProblem(p)).find(Boolean);
+  if (!active.length) return $("ed-error").textContent = "At least one player is required.";
+  if (problem) return $("ed-error").textContent = problem;
+  if (document.querySelector("#ed-cards .bad")) return $("ed-error").textContent = "Fix the highlighted settings (they must be valid JSON).";
+  $("regen-dialog").showModal();
+};
+$("regen-cancel").onclick = () => $("regen-dialog").close();
+$("regen-confirm").onclick = async () => {
+  $("regen-dialog").close();
+  const players = editor.players.map(p => p.remove ? {file: p.file, remove: true}
+    : !p.editable ? {file: p.file, unchanged: true}
+    : {file: p.file, name: p.name.trim(), game: p.game, set: p.set, unset: [...p.unset]});
+  awaiting = "pending";
+  $("ed-fields").disabled = $("ed-save").disabled = true;
+  try {
+    const response = await fetch("/api/config", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({players, prefer_other_players: $("prefer-others").checked})});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Saving failed");
+    if (awaiting === "pending") awaiting = "running";
+    poll();
+  } catch (error) {
+    awaiting = null;
+    $("ed-fields").disabled = false;
+    $("ed-save").disabled = !!roomState?.busy;
+    $("ed-error").textContent = error.message;
+  }
+};
+
 load();
 </script>
 </body>

@@ -1,9 +1,15 @@
-"""Serve one explicitly selected seed with a tracker and host-only console."""
+"""Serve a seed with a tracker, host-only console and a website editor that can regenerate the room."""
 import argparse
 import asyncio
+import base64
 import collections
+import copy
+import hashlib
+import importlib.util
 import json
 import os
+from pathlib import Path
+import re
 import shlex
 import signal
 import socket
@@ -15,16 +21,19 @@ import time
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote
 
 import websockets
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = Path(DIR).parent
 AP = None
 STATUS_NAMES = {0: "not connected", 5: "connected", 10: "ready", 20: "playing", 30: "goal reached"}
+MAX_NAME_LENGTH = 16  # Archipelago's slot name limit
 
 def load_checks(zip_path):
-    sys.path.insert(0, AP)
+    if AP not in sys.path:
+        sys.path.insert(0, AP)
     from MultiServer import Context
     with zipfile.ZipFile(zip_path) as archive:
         name = next(name for name in archive.namelist() if name.endswith(".archipelago"))
@@ -83,6 +92,25 @@ class Server:
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
+    def stop(self):
+        """Gracefully exits MultiServer so it writes its save, escalating if it hangs."""
+        if not self.running:
+            return
+        try:
+            self.command("/exit")
+        except (OSError, ValueError) as error:
+            print(f"Could not request graceful shutdown: {error}", file=sys.stderr)
+            self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+
 
 class Tracker:
     """One Tracker-tagged connection per slot: checked locations, received items, client status, feed."""
@@ -94,12 +122,29 @@ class Tracker:
         self.feed = collections.deque(maxlen=150)
         self.names = {"item": {}, "location": {}}  # game -> id -> name
         self.games = {p["slot"]: p["game"] for p in players}
+        self.loop = None
+        self.stopped = False
 
     def run(self):
-        loop = asyncio.new_event_loop()
-        for p in self.players:
-            loop.create_task(self._track(p, feed=p is self.players[0]))
-        loop.run_forever()
+        loop = self.loop = asyncio.new_event_loop()
+        tasks = [loop.create_task(self._track(p, feed=p is self.players[0])) for p in self.players]
+        try:
+            if not self.stopped:
+                loop.run_forever()
+        finally:
+            for task in tasks:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            loop.close()
+
+    def stop(self):
+        self.stopped = True
+        loop = self.loop
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass
 
     async def _track(self, player, feed):
         slot = player["slot"]
@@ -189,6 +234,418 @@ class Tracker:
         return parts
 
 
+_launch = None
+
+
+def launcher():
+    """The launcher module (generation, world sync, room settings), loaded from this folder."""
+    global _launch
+    if _launch is None:
+        spec = importlib.util.spec_from_file_location("multiworld_launch", os.path.join(DIR, "launch.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _launch = module
+    return _launch
+
+
+# ---------------------------------------------------------------- WebSocket (RFC 6455, server side, text only)
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def ws_accept(key):
+    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+
+
+def ws_frame(payload, opcode=0x1):
+    if isinstance(payload, str):
+        payload = payload.encode()
+    size = len(payload)
+    if size < 126:
+        header = bytes([0x80 | opcode, size])
+    elif size < 1 << 16:
+        header = bytes([0x80 | opcode, 126]) + size.to_bytes(2, "big")
+    else:
+        header = bytes([0x80 | opcode, 127]) + size.to_bytes(8, "big")
+    return header + payload
+
+
+def ws_read(stream):
+    """Returns (opcode, payload) of one client frame, or None when the connection ended."""
+    head = stream.read(2)
+    if len(head) < 2:
+        return None
+    opcode, size = head[0] & 0x0F, head[1] & 0x7F
+    if size == 126:
+        size = int.from_bytes(stream.read(2), "big")
+    elif size == 127:
+        size = int.from_bytes(stream.read(8), "big")
+    if size > 1 << 20:
+        return None
+    mask = stream.read(4) if head[1] & 0x80 else b""
+    payload = stream.read(size)
+    if len(payload) < size:
+        return None
+    if mask:
+        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return opcode, payload
+
+
+class SocketClient:
+    def __init__(self, connection, admin):
+        self.connection, self.admin = connection, admin
+        self.lock = threading.Lock()
+
+    def send(self, text, opcode=0x1):
+        with self.lock:
+            self.connection.sendall(ws_frame(text, opcode))
+
+
+# ---------------------------------------------------------------- Player YAML editing
+
+def read_players(root):
+    """Describes every player YAML beside start.sh for the editor."""
+    import yaml
+    try:
+        files = launcher().player_files(root)
+    except ValueError:
+        return []
+    players = []
+    for path in files:
+        entry = {"file": path.name, "editable": False, "reason": None, "name": "", "game": "", "options": {}}
+        players.append(entry)
+        try:
+            documents = [document for document in yaml.safe_load_all(path.read_text()) if document is not None]
+        except (yaml.YAMLError, UnicodeDecodeError) as error:
+            entry["reason"] = f"Invalid YAML: {error}"
+            continue
+        if len(documents) != 1 or not isinstance(documents[0], dict):
+            entry["reason"] = "Contains several players or a non-standard layout; edit the file directly."
+            continue
+        document = documents[0]
+        name, game = document.get("name", ""), document.get("game")
+        if isinstance(name, str):
+            entry["name"] = name
+        if isinstance(game, str):
+            entry["game"] = game
+        section = document.get(game, {}) if isinstance(game, str) else None
+        if not isinstance(name, str) or not isinstance(game, str) or not isinstance(section or {}, dict):
+            entry["reason"] = "Uses weighted or random names/games; edit the file directly."
+            continue
+        entry.update(editable=True, options=json.loads(json.dumps(section or {}, default=str)))
+    return players
+
+
+def file_name_for(name, taken):
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_") or "Player"
+    candidate, number = f"{stem}.yaml", 2
+    while candidate.lower() in taken:
+        candidate, number = f"{stem}-{number}.yaml", number + 1
+    return candidate
+
+
+def plan_config(root, body, games=None):
+    """Validates an editor submission. Returns (generation inputs, commit function, room settings)."""
+    import yaml
+    if not isinstance(body.get("players"), list) or not isinstance(body.get("prefer_other_players", True), bool):
+        raise ValueError("Expected a list of players")
+    try:
+        current = {path.name: path for path in launcher().player_files(root)}
+    except ValueError:
+        current = {}
+    taken = {name.lower() for name in current}
+    inputs, writes, removals, seen, names = {}, {}, [], set(), set()
+    for player in body["players"]:
+        if not isinstance(player, dict):
+            raise ValueError("Invalid player entry")
+        file = player.get("file")
+        if file is not None and (not isinstance(file, str) or file not in current or file in seen):
+            raise ValueError(f"Unknown or duplicate player file: {file}")
+        if file is not None:
+            seen.add(file)
+            original_bytes = current[file].read_bytes()
+        if player.get("remove"):
+            if file is None:
+                continue
+            removals.append(file)
+            continue
+        if file is not None and player.get("unchanged"):
+            inputs[file] = original_bytes
+            continue
+        name, game = player.get("name"), player.get("game")
+        changes, resets = player.get("set", {}), player.get("unset", [])
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Every player needs a name")
+        name = name.strip()
+        if len(name) > MAX_NAME_LENGTH:
+            raise ValueError(f"Player name {name!r} is longer than {MAX_NAME_LENGTH} characters")
+        if name.lower() in names:
+            raise ValueError(f"Player name {name!r} is used twice")
+        names.add(name.lower())
+        if not isinstance(game, str) or not game or (games is not None and game not in games):
+            raise ValueError(f"Unknown game for {name}: {game!r}")
+        if not isinstance(changes, dict) or not isinstance(resets, list) or not all(
+                isinstance(key, str) for key in [*changes, *resets]):
+            raise ValueError(f"Invalid settings for {name}")
+        if file is None:
+            document, original = {"name": name, "game": game, "description": "Created in the website editor."}, None
+            file = file_name_for(name, taken)
+            taken.add(file.lower())
+        else:
+            documents = [d for d in yaml.safe_load_all(original_bytes) if d is not None]
+            if len(documents) != 1 or not isinstance(documents[0], dict):
+                raise ValueError(f"{file} cannot be edited on the website; edit the file directly")
+            original = documents[0]
+            document = copy.deepcopy(original)
+        previous_game = document.get("game")
+        if previous_game != game:
+            if isinstance(previous_game, str):
+                document.pop(previous_game, None)  # Settings of the old game do not apply to the new one.
+            document["game"] = game
+        document["name"] = name
+        section = document.get(game) or {}
+        if not isinstance(section, dict):
+            raise ValueError(f"{file} has a non-standard {game} section; edit the file directly")
+        for key in resets:
+            section.pop(key, None)
+        section.update(changes)
+        document[game] = section
+        if document == original:
+            inputs[file] = original_bytes
+        else:
+            inputs[file] = writes[file] = yaml.safe_dump(document, sort_keys=False, allow_unicode=True).encode()
+    for file, path in current.items():
+        if file not in seen:
+            inputs[file] = path.read_bytes()
+    if not inputs:
+        raise ValueError("At least one player is required")
+    settings = {"prefer_other_players": body.get("prefer_other_players", True)}
+
+    def commit():
+        for file, content in writes.items():
+            temporary = root / f".{file}.tmp"
+            temporary.write_bytes(content)
+            temporary.replace(root / file)
+        if removals:
+            inactive = root / "inactive-players"
+            inactive.mkdir(exist_ok=True)
+            for file in removals:
+                target, number = inactive / file, 2
+                while target.exists():
+                    target, number = inactive / f"{Path(file).stem}-{number}{Path(file).suffix}", number + 1
+                (root / file).replace(target)
+        launcher().save_room_settings(settings)
+
+    return sorted(inputs.items(), key=lambda item: item[0]), commit, settings
+
+
+# ---------------------------------------------------------------- Room lifecycle
+
+# Generation output line -> (progress, label). Progress only moves forward.
+PHASES = [
+    ("Generating a NEW seed", 0.04, "Reading player files"),
+    ("Archipelago Version", 0.08, "Loading games"),
+    ("Creating MultiWorld", 0.2, "Creating worlds"),
+    ("Creating Items", 0.28, "Creating items"),
+    ("Calculating Access Rules", 0.34, "Calculating access rules"),
+    ("Running Item Plando", 0.4, "Placing fixed items"),
+    ("Filling the multiworld", 0.45, "Randomizing items"),
+    ("Balancing multiworld progression", 0.55, "Balancing progression"),
+    ("Cross-player placement", 0.62, "Moving items to other players"),
+    ("Beginning output", 0.7, "Writing seed files"),
+    ("Creating final archive", 0.8, "Packing the seed"),
+    ("Done. Enjoy", 0.84, "Seed created"),
+    ("plan ", 0.88, "Building the path-to-goal graph"),
+    ("Wrote ", 0.94, "Seed ready"),
+]
+
+
+class Room:
+    """Owns the running seed (game server + tracker) and replaces it with freshly generated ones."""
+
+    def __init__(self, ctx, engine, port, root=ROOT):
+        self.ctx, self.engine, self.port, self.root = ctx, engine, port, Path(root)
+        ctx["room"] = self
+        self.lock = threading.Lock()
+        self.clients = set()
+        self.state = {"phase": "starting", "message": "Starting the game server", "progress": 0.0,
+                      "error": None, "busy": True}
+        self.generation_log = collections.deque(maxlen=500)
+        self.process = None
+        self.closing = False
+        self.schema_lock = threading.Lock()
+        self.schema = (None, None)
+
+    # -- clients
+    def snapshot(self):
+        with self.lock:
+            return {"type": "state", **self.state, "seed": self.ctx.get("graph", {}).get("seed")}
+
+    def attach(self, client):
+        with self.lock:
+            self.clients.add(client)
+        client.send(json.dumps(self.snapshot()))
+        if client.admin:
+            client.send(json.dumps({"type": "log", "lines": list(self.generation_log)}))
+
+    def detach(self, client):
+        with self.lock:
+            self.clients.discard(client)
+
+    def broadcast(self, message, admin_only=False):
+        text = json.dumps(message)
+        with self.lock:
+            clients = [client for client in self.clients if client.admin or not admin_only]
+        for client in clients:
+            try:
+                client.send(text)
+            except OSError:
+                self.detach(client)
+
+    def update(self, **changes):
+        with self.lock:
+            self.state.update(changes)
+        self.broadcast(self.snapshot())
+
+    # -- options schema for the editor
+    def options_schema(self):
+        custom = Path(self.engine) / "custom_worlds"
+        signature = hashlib.sha256(json.dumps(sorted(
+            (path.name, path.stat().st_size, path.stat().st_mtime) for path in custom.glob("*.apworld")
+        ) if custom.is_dir() else []).encode()).hexdigest()[:16]
+        with self.schema_lock:
+            if self.schema[0] == signature:
+                return self.schema[1]
+            cache = self.root / ".cache" / f"options-{signature}.json"
+            if not cache.is_file():
+                cache.parent.mkdir(exist_ok=True)
+                temporary = cache.with_suffix(".tmp")
+                result = subprocess.run([sys.executable, os.path.join(DIR, "options_schema.py"), str(temporary)],
+                                        cwd=self.engine, env={**os.environ, "SKIP_REQUIREMENTS_UPDATE": "1"},
+                                        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+                if result.returncode or not temporary.is_file():
+                    raise RuntimeError("Could not read game options:\n" + result.stdout[-3000:] + result.stderr[-3000:])
+                temporary.replace(cache)
+            self.schema = (signature, json.loads(cache.read_text())["games"])
+            return self.schema[1]
+
+    # -- seed lifecycle
+    def start_campaign(self, zip_path):
+        """Starts MultiServer for a seed, waits until it listens and attaches a fresh tracker."""
+        zip_path = os.path.abspath(zip_path)
+        graph_path = zip_path[:-4] + ".graph.json"
+        with open(graph_path) as source:
+            graph = json.load(source)
+        with zipfile.ZipFile(zip_path) as archive:
+            downloads = [name for name in archive.namelist() if not name.endswith(".archipelago")]
+        downloads.append(os.path.basename(graph_path))
+        checks = load_checks(zip_path)
+        server = Server(zip_path, self.port)
+        server.start()
+        deadline = time.monotonic() + 30
+        try:
+            while True:
+                if not server.running:
+                    raise RuntimeError("Game server failed to start:\n" + "\n".join(server.log))
+                try:
+                    with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Game server did not listen within 30 seconds:\n" + "\n".join(server.log))
+                    time.sleep(0.1)
+        except BaseException:
+            server.stop()
+            raise
+        tracker = Tracker(f"ws://127.0.0.1:{self.port}", graph["players"])
+        threading.Thread(target=tracker.run, daemon=True).start()
+        self.ctx.update(graph=graph, graph_path=graph_path, zip=zip_path, downloads=downloads,
+                        checks=checks, server=server, tracker=tracker)
+
+    def stop_current(self):
+        tracker, server = self.ctx.get("tracker"), self.ctx.get("server")
+        if tracker is not None:
+            tracker.stop()
+        if server is not None:
+            server.stop()
+
+    def regenerate(self, inputs, commit, settings):
+        with self.lock:
+            if self.state["busy"] or self.closing:
+                return False
+            self.state["busy"] = True
+        self.generation_log.clear()
+        threading.Thread(target=self._rebuild, args=(inputs, commit, settings), daemon=True).start()
+        return True
+
+    def _generation_line(self, line):
+        self.generation_log.append(line)
+        self.broadcast({"type": "log", "lines": [line]}, admin_only=True)
+        for marker, progress, label in PHASES:
+            if marker in line and progress > self.state["progress"]:
+                self.update(progress=progress, message=label)
+
+    def _set_process(self, process):
+        self.process = process
+        if self.closing:
+            process.terminate()
+
+    def _rebuild(self, inputs, commit, settings):
+        self.update(phase="generating", message="Generating a new seed", progress=0.01, error=None)
+        try:
+            launch = launcher()
+            launch.sync_worlds(Path(self.engine))
+            campaign = launch.generate_inputs(
+                Path(sys.executable), Path(self.engine), inputs, {**os.environ, "SKIP_REQUIREMENTS_UPDATE": "1"},
+                on_line=self._generation_line, on_process=self._set_process,
+                prefer_other_players=settings["prefer_other_players"])
+            commit()
+        except Exception as error:
+            if self.closing:
+                return
+            running = self.ctx.get("server") is not None and self.ctx["server"].running
+            self.update(phase="running" if running else "error", progress=0.0, busy=False,
+                        message="Generation failed. Nothing was changed" + (
+                            "; the previous seed is still running." if running else "."),
+                        error=str(error) + ("\n\n" + "\n".join(list(self.generation_log)[-25:])
+                                            if self.generation_log else ""))
+            return
+        finally:
+            self.process = None
+        if self.closing:
+            return
+        try:
+            self.update(phase="stopping", progress=0.96, message="Stopping the previous game server")
+            self.stop_current()
+            self.update(phase="starting", progress=0.98, message="Starting the new game server")
+            self.start_campaign(str(campaign))
+        except Exception as error:
+            self.update(phase="error", progress=0.0, busy=False, message="The new game server failed to start.",
+                        error=str(error))
+            return
+        self.update(phase="running", progress=1.0, busy=False, error=None,
+                    message="New seed is running. Players must reconnect and start fresh.")
+        self.broadcast({"type": "reload", "seed": self.ctx["graph"]["seed"]})
+
+    def watch(self):
+        """Reports a game server that stopped on its own."""
+        server = self.ctx.get("server")
+        if server is not None and not server.running and self.state["phase"] == "running" and not self.state["busy"]:
+            self.update(phase="error", message="The game server stopped unexpectedly. Save in edit mode to start a new seed.",
+                        error="\n".join(list(server.log)[-25:]))
+
+    def close(self):
+        self.closing = True
+        process = self.process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self.stop_current()
+
+
 def make_handler(ctx):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -209,8 +666,88 @@ def make_handler(ctx):
         def _local(self):
             return self.client_address[0] in ("127.0.0.1", "::1")
 
+        def _same_origin(self):
+            origin = self.headers.get("Origin")
+            return origin is None or origin == f"http://{self.headers.get('Host')}"
+
+        def _json(self, body, status=200):
+            return self._send(json.dumps(body), status=status)
+
+        def _websocket(self):
+            key = self.headers.get("Sec-WebSocket-Key")
+            if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
+                return self._send("expected a WebSocket upgrade", "text/plain", 400)
+            room = ctx.get("room")
+            if room is None:
+                return self._send("room updates are unavailable", "text/plain", 503)
+            self.protocol_version = "HTTP/1.1"  # WebSocket clients reject an HTTP/1.0 upgrade response.
+            self.send_response(101, "Switching Protocols")
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", ws_accept(key))
+            self.end_headers()
+            self.wfile.flush()
+            self.close_connection = True
+            client = SocketClient(self.connection, admin=self._local() and self._same_origin())
+            try:
+                room.attach(client)
+                while (frame := ws_read(self.rfile)) is not None:
+                    opcode, payload = frame
+                    if opcode == 0x8:
+                        client.send(payload[:2], 0x8)
+                        break
+                    if opcode == 0x9:
+                        client.send(payload, 0xA)
+            except OSError:
+                pass
+            finally:
+                room.detach(client)
+
+        def _editor_get(self, path, query):
+            room = ctx.get("room")
+            if not self._local():
+                return self._json({"error": "Editing is only available on the host machine"}, 403)
+            if room is None:
+                return self._json({"error": "Editing is unavailable"}, 503)
+            if path == "/api/config":
+                return self._json({"players": read_players(room.root),
+                                   "prefer_other_players": launcher().room_settings()["prefer_other_players"]})
+            try:
+                schema = room.options_schema()
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+                return self._json({"error": str(error)}, 500)
+            if path == "/api/games":
+                return self._json(sorted(schema))
+            game = query.get("game", [""])[0]
+            if game not in schema:
+                return self._json({"error": f"Unknown game: {game}"}, 404)
+            return self._json(schema[game])
+
+        def _editor_save(self, body):
+            room = ctx.get("room")
+            if room is None:
+                return self._json({"error": "Editing is unavailable"}, 503)
+            if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json" \
+                    or not self._same_origin():
+                return self._json({"error": "Expected a same-origin JSON request"}, 403)
+            if room.state["busy"]:
+                return self._json({"error": "The room is already being regenerated"}, 409)
+            try:
+                games = room.options_schema()
+                inputs, commit, settings = plan_config(room.root, body, games)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+                return self._json({"error": str(error)}, 400)
+            if not room.regenerate(inputs, commit, settings):
+                return self._json({"error": "The room is already being regenerated"}, 409)
+            return self._json({"ok": True}, 202)
+
         def do_GET(self):
             path = unquote(self.path.split("?")[0])
+            query = parse_qs(self.path.partition("?")[2])
+            if path == "/ws":
+                return self._websocket()
+            if path in ("/api/config", "/api/games", "/api/options"):
+                return self._editor_get(path, query)
             if path == "/":
                 return self._send(open(os.path.join(DIR, "site.html"), "rb").read(), "text/html; charset=utf-8")
             if path == "/api/graph":
@@ -218,7 +755,7 @@ def make_handler(ctx):
             if path == "/api/checks":
                 return self._send(json.dumps(ctx["checks"]))
             if path == "/api/status":
-                tr, srv = ctx["tracker"], ctx["server"]
+                tr, srv, room = ctx["tracker"], ctx["server"], ctx.get("room")
                 return self._send(json.dumps({
                     "server": {"running": srv.running, "port": srv.port, "lan": ctx["lan"],
                                "seed": ctx["graph"]["seed"]},
@@ -233,6 +770,7 @@ def make_handler(ctx):
                     "admin": self._local(),
                     "log": list(srv.log)[-200:] if self._local() else [],
                     "downloads": ctx["downloads"],
+                    "room": room.snapshot() if room else None,
                 }))
             if path.startswith("/download/"):
                 name = path[len("/download/"):]
@@ -248,7 +786,7 @@ def make_handler(ctx):
             self._send("not found", "text/plain", 404)
 
         def do_POST(self):
-            if self.path not in ("/api/command", "/api/check"):
+            if self.path not in ("/api/command", "/api/check", "/api/config"):
                 return self._send("not found", "text/plain", 404)
             if not self._local():
                 return self._send(json.dumps({"error": "admin commands are only accepted from the host machine"}), status=403)
@@ -258,12 +796,17 @@ def make_handler(ctx):
                     raise ValueError("Expected a JSON object")
             except (ValueError, UnicodeDecodeError):
                 return self._send(json.dumps({"error": "Invalid JSON request"}), status=400)
+            if self.path == "/api/config":
+                return self._editor_save(body)
             if self.path == "/api/check":
                 slot, location = body.get("slot"), body.get("location")
+                if "seed" in body and body["seed"] != ctx["graph"]["seed"]:
+                    return self._send(json.dumps({"error": "The room now runs a different seed. Reload the page."}), status=409)
                 if type(slot) is not int or type(location) is not int or not any(
                         check["id"] == location for check in ctx["checks"].get(slot, [])):
                     return self._send(json.dumps({"error": "Unknown player or location"}), status=400)
-                if not ctx["server"].running or not ctx["tracker"].state[slot]["online"]:
+                tracked = ctx["tracker"].state.get(slot)
+                if not ctx["server"].running or not tracked or not tracked["online"]:
                     return self._send(json.dumps({"error": "Server or tracker is not connected"}), status=503)
                 if location in ctx["tracker"].state[slot]["checked"]:
                     return self._send(json.dumps({"ok": True, "already_checked": True}))
@@ -281,7 +824,12 @@ def make_handler(ctx):
             text = str(body.get("command", "")).strip()
             if not text or "\n" in text:
                 return self._send(json.dumps({"error": "empty command"}), status=400)
-            ctx["server"].command(text)
+            if not ctx["server"].running:
+                return self._send(json.dumps({"error": "The game server is not running"}), status=503)
+            try:
+                ctx["server"].command(text)
+            except (OSError, ValueError) as error:
+                return self._send(json.dumps({"error": f"Could not send command: {error}"}), status=503)
             self._send(json.dumps({"ok": True}))
 
     return Handler
@@ -305,14 +853,8 @@ def main():
     ap.add_argument("--ap-port", type=int, default=38285)
     args = ap.parse_args()
     AP = os.path.abspath(args.runtime)
-    zip_path = os.path.abspath(args.campaign)
-    graph_path = zip_path[:-4] + ".graph.json"
-    graph = json.load(open(graph_path))
-    with zipfile.ZipFile(zip_path) as z:
-        downloads = [n for n in z.namelist() if not n.endswith(".archipelago")]
-    downloads.append(os.path.basename(graph_path))
-
-    server = Server(zip_path, args.ap_port)
+    ctx = {"lan": lan_ip()}
+    room = Room(ctx, AP, args.ap_port)
     httpd = None
 
     def stop(_signum, _frame):
@@ -320,51 +862,23 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     try:
-        checks = load_checks(zip_path)
-        server.start()
-        deadline = time.monotonic() + 30
-        while True:
-            if not server.running:
-                raise RuntimeError("Game server failed to start:\n" + "\n".join(server.log))
-            try:
-                with socket.create_connection(("127.0.0.1", args.ap_port), timeout=0.2):
-                    break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("Game server did not listen within 30 seconds:\n" + "\n".join(server.log))
-                time.sleep(0.1)
-        tracker = Tracker(f"ws://127.0.0.1:{args.ap_port}", graph["players"])
-        threading.Thread(target=tracker.run, daemon=True).start()
-        ctx = {"graph": graph, "graph_path": graph_path, "zip": zip_path, "downloads": downloads,
-               "checks": checks, "server": server, "tracker": tracker, "lan": lan_ip()}
+        room.start_campaign(args.campaign)
+        room.update(phase="running", progress=1.0, busy=False, message="Game server running")
         httpd = WebServer(("0.0.0.0", args.web_port), make_handler(ctx))
-        httpd.timeout = 0.5
+        threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True).start()
         print(f"Website: http://{ctx['lan']}:{args.web_port}  (http://localhost:{args.web_port})", flush=True)
         print(f"Game server: ws://{ctx['lan']}:{args.ap_port}", flush=True)
-        while server.running:
-            httpd.handle_request()
-        if server.proc.returncode:
-            raise RuntimeError("Game server stopped:\n" + "\n".join(server.log))
+        print(f"Edit players and start new seeds at http://localhost:{args.web_port}/ (Edit button)", flush=True)
+        while True:
+            time.sleep(0.5)
+            room.watch()
     except KeyboardInterrupt:
         print("\nStopping room and saving progress...", flush=True)
     finally:
         if httpd is not None:
+            httpd.shutdown()
             httpd.server_close()
-        if server.running:
-            try:
-                server.command("/exit")
-            except (OSError, ValueError) as error:
-                print(f"Could not request graceful shutdown: {error}", file=sys.stderr)
-                server.proc.terminate()
-            try:
-                server.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                server.proc.terminate()
-                try:
-                    server.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    server.proc.kill()
-                    server.proc.wait()
+        room.close()
 
 
 if __name__ == "__main__":

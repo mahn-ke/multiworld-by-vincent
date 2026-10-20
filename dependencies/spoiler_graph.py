@@ -4,8 +4,14 @@ Run from inside the Archipelago folder with the launcher's venv Python.
 For "all" and for each slot, the graph lists only the progression items that
 are needed to reach the goal (pruned like Archipelago's spoiler playthrough),
 grouped into spheres, with who finds each item and who receives it.
+
+By default, items are afterwards moved so that as many checks as possible
+unlock something for another player (see cross_player.py). Pass
+--allow-self-checks to keep Archipelago's normal placement.
 """
+import argparse
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -13,10 +19,16 @@ import time
 
 os.environ.setdefault("SKIP_REQUIREMENTS_UPDATE", "1")
 sys.path.insert(0, os.getcwd())
+sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))
+# Progress lines for the launcher and the website (Generate is imported, so it doesn't configure logging).
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
 
 import Generate  # noqa: E402
 import Main  # noqa: E402
 from BaseClasses import CollectionState  # noqa: E402
+from worlds import AutoWorld  # noqa: E402
+
+import cross_player  # noqa: E402
 
 
 def beatable(mw, targets, locations):
@@ -80,9 +92,39 @@ def describe(mw, sphere):
     return out
 
 
+def install_cross_player_pass():
+    """Runs the cross-player pass after fill/balancing, right before worlds finalize their output."""
+    original = AutoWorld.call_all
+
+    def call_all(multiworld, method_name, *args):
+        if method_name == "finalize_multiworld" and multiworld.players > 1:
+            started = time.time()
+            players = set(multiworld.player_ids)
+            accessible = multiworld.fulfills_accessibility()
+
+            def valid():
+                return multiworld.can_beat_game() and (not accessible or multiworld.fulfills_accessibility())
+
+            moved, remaining = cross_player.prefer_other_players(
+                multiworld, CollectionState(multiworld), valid, players, seed=multiworld.seed,
+                log=lambda text: print(text, flush=True))
+            print(f"Cross-player placement: moved {moved} self-placed item(s) to other players, "
+                  f"{remaining} could not be moved ({time.time() - started:.1f}s)", flush=True)
+        return original(multiworld, method_name, *args)
+
+    AutoWorld.call_all = call_all
+
+
 def main():
-    players_dir = sys.argv[1]
-    output_dir = sys.argv[2]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-self-checks", action="store_true",
+                        help="Keep normal placement instead of preferring items for other players")
+    parser.add_argument("players_dir")
+    parser.add_argument("output_dir")
+    options = parser.parse_args()
+    players_dir, output_dir = options.players_dir, options.output_dir
+    if not options.allow_self_checks:
+        install_cross_player_pass()
     for path in Path(players_dir).iterdir():
         documents = Generate.read_weights_yamls(str(path))
         if not any(isinstance(document, dict) and document for document in documents):
