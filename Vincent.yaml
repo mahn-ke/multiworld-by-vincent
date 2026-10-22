@@ -2,4 +2,10 @@ name: Vincent
 game: Peglin
 description: Created in the website editor.
 Peglin:
-  death_link: true
+  death_link: false
+  remote_custom_start: false
+  remote_classes: false
+  remote_common_orbs: false
+  remote_unavailable_orbs: false
+  remote_common_relics: false
+  remote_unavailable_relics: false

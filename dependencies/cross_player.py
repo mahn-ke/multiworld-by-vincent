@@ -1,10 +1,13 @@
-"""Moves self-placed items into other players' worlds after the main fill.
+"""Spreads rewards across other players' worlds after the main fill.
 
 Swaps keep every item rule (local/non-local items, excluded locations) and only
 keep progression swaps that leave the multiworld beatable with unchanged
-accessibility. When perfect separation is impossible (e.g. one player has many
-more locations than the others) the remaining items stay where they are.
+accessibility. Spreading rewards takes precedence over removing every possible
+self-item; players of the same game are treated like any other players.
 """
+from collections import Counter
+from itertools import combinations, islice, product
+from math import prod
 import random
 import time
 
@@ -33,17 +36,102 @@ def swap(first, second):
     first.item.location, second.item.location = first, second
 
 
+def spread_rewards(locations, state, valid, rng, deadline, log):
+    counts = Counter((location.player, location.item.player) for location in locations)
+
+    def improvement(before_pairs, after_pairs):
+        changes = Counter()
+        for pair in before_pairs:
+            changes[pair] -= 1
+        for pair in after_pairs:
+            changes[pair] += 1
+        remote = [pair for pair, delta in changes.items() if delta and pair[0] != pair[1]]
+        # Maximize sum(log(1 + pair count)): rewards for an underserved pair
+        # matter more than further concentrating rewards in an existing pair.
+        before = prod(counts[pair] + 1 for pair in remote)
+        after = prod(counts[pair] + changes[pair] + 1 for pair in remote)
+        fewer_self = sum(delta for (finder, receiver), delta in changes.items() if finder == receiver) < 0
+        return changes if after > before or (after == before and fewer_self) else None
+
+    def rotate_rewards():
+        groups = {}
+        for location in locations:
+            groups.setdefault((location.player, location.item.player), []).append(location)
+        # A three-player cycle can improve the spread when every two-way swap
+        # would temporarily create a self-item and reduce the score.
+        for keys in combinations(groups, 3):
+            if time.monotonic() > deadline:
+                return False
+            if len({p for p, _ in keys}) != 3 or len({p for _, p in keys}) != 3:
+                continue
+            for a, b, c in (keys, (keys[0], keys[2], keys[1])):
+                if time.monotonic() > deadline:
+                    return False
+                changes = improvement((a, b, c), ((a[0], c[1]), (b[0], a[1]), (c[0], b[1])))
+                if changes is None:
+                    continue
+                for first, second, third in islice(product(groups[a], groups[b], groups[c]), PARTNER_ATTEMPTS):
+                    if time.monotonic() > deadline:
+                        return False
+                    if not (accepts(first, third.item, state) and accepts(second, first.item, state)
+                            and accepts(third, second.item, state)):
+                        continue
+                    progression = any(location.item.advancement for location in (first, second, third))
+                    swap(first, second)
+                    swap(first, third)
+                    if progression and not valid():
+                        swap(first, third)
+                        swap(first, second)
+                        continue
+                    counts.update(changes)
+                    return True
+        return False
+
+    round_number = 0
+    while time.monotonic() < deadline:
+        round_number += 1
+        rng.shuffle(locations)
+        accepted = 0
+        for first in locations:
+            for second in locations[:PARTNER_ATTEMPTS]:
+                if time.monotonic() > deadline:
+                    break
+                a, b = first.player, second.player
+                x, y = first.item.player, second.item.player
+                if a == b or x == y:
+                    continue
+                changes = improvement(((a, x), (b, y)), ((a, y), (b, x)))
+                if changes is None or not (accepts(first, second.item, state)
+                                           and accepts(second, first.item, state)):
+                    continue
+                progression = first.item.advancement or second.item.advancement
+                swap(first, second)
+                if progression and not valid():
+                    swap(first, second)
+                    continue
+                counts.update(changes)
+                accepted += 1
+                break
+            if time.monotonic() > deadline:
+                break
+        log(f"Cross-player placement spread round {round_number}: {accepted} swap(s), "
+            f"{sum(1 for location in locations if is_self(location))} self-placed item(s)")
+        if not accepted and not rotate_rewards():
+            break
+
+
 def prefer_other_players(multiworld, state, valid, players, seed=0, budget=120.0, log=print):
-    """Returns (moved, remaining) counts of self-placed items.
+    """Returns (net reduction, remaining) counts of self-placed items.
 
     `valid()` must return whether the current placement is still acceptable.
+    The net reduction can be negative when spreading rewards needs more self-items.
     """
     rng = random.Random(seed)
     deadline = time.monotonic() + budget
     locations = [location for location in multiworld.get_filled_locations()
                  if location.player in players and movable(location)]
     initial = sum(1 for location in locations if is_self(location))
-    if len(players) < 2 or not initial:
+    if len(players) < 2:
         return 0, initial
 
     def committed(swaps):
@@ -100,5 +188,6 @@ def prefer_other_players(multiworld, state, valid, players, seed=0, budget=120.0
             f"{sum(1 for l in locations if is_self(l))} self-placed item(s) left")
         if not accepted or time.monotonic() > deadline:
             break
+    spread_rewards(locations, state, valid, rng, deadline, log)
     remaining = sum(1 for location in locations if is_self(location))
     return initial - remaining, remaining

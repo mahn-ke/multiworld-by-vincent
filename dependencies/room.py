@@ -475,6 +475,13 @@ class Room:
         self.closing = False
         self.schema_lock = threading.Lock()
         self.schema = (None, None)
+        # Players who have left: slot -> {"since": time of the last grant or of checking the box,
+        # "sent": location -> time it was sent and not yet confirmed}. Kept for the current seed only.
+        self.left, self.left_seed = {}, None
+        try:
+            self.left_interval = launcher().room_settings()["left_player_interval"]
+        except ValueError:
+            self.left_interval = 60
 
     # -- clients
     def snapshot(self):
@@ -559,6 +566,9 @@ class Room:
             raise
         tracker = Tracker(f"ws://127.0.0.1:{self.port}", graph["players"])
         threading.Thread(target=tracker.run, daemon=True).start()
+        with self.lock:
+            if self.left_seed != graph.get("seed"):
+                self.left, self.left_seed = {}, graph.get("seed")
         self.ctx.update(graph=graph, graph_path=graph_path, zip=zip_path, downloads=downloads,
                         checks=checks, server=server, tracker=tracker)
 
@@ -577,6 +587,35 @@ class Room:
         self.generation_log.clear()
         threading.Thread(target=self._rebuild, args=(inputs, commit, settings), daemon=True).start()
         return True
+
+    def control_server(self, action):
+        with self.lock:
+            if self.state["busy"] or self.closing:
+                return False
+            self.state["busy"] = True
+        threading.Thread(target=self._control_server, args=(action,), daemon=True).start()
+        return True
+
+    def _control_server(self, action):
+        self.update(phase="stopping" if action == "stop" else "starting",
+                    message="Saving and stopping the game server" if action == "stop"
+                    else "Resuming the current seed", progress=0.0, error=None)
+        try:
+            if action == "stop":
+                self.stop_current()
+                for player in self.ctx["tracker"].state.values():
+                    player.update(online=False, games=0)
+            elif not self.ctx["server"].running:
+                self.stop_current()
+                self.start_campaign(self.ctx["zip"])
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            self.update(phase="error", busy=False, message="Could not change the game server state.",
+                        error=str(error))
+            return
+        running = self.ctx["server"].running
+        self.update(phase="running" if running else "stopped", busy=False, progress=1.0,
+                    error=None, message="Current seed resumed. Players can reconnect." if running
+                    else "Game server stopped. Start server to resume this seed, or edit to create a new one.")
 
     def _generation_line(self, line):
         self.generation_log.append(line)
@@ -627,11 +666,83 @@ class Room:
                     message="New seed is running. Players must reconnect and start fresh.")
         self.broadcast({"type": "reload", "seed": self.ctx["graph"]["seed"]})
 
+    # -- players who have left: their checks for other players unlock one at a time
+    LEFT_RETRY = 30  # seconds before an unconfirmed automatic unlock may be sent again
+
+    def left_candidates(self, slot):
+        """Unchecked locations in a player's world whose items go to other players, earliest progression first."""
+        graph = self.ctx.get("graph", {})
+        player = next((p for p in graph.get("players", []) if p["slot"] == slot), None)
+        tracked = self.ctx["tracker"].state.get(slot) if self.ctx.get("tracker") else None
+        if player is None or tracked is None:
+            return []
+        order = {}
+        for index, sphere in enumerate(graph.get("plans", {}).get("all", {}).get("spheres", [])):
+            for node in sphere:
+                if node.get("finder") == slot and node.get("location_id") is not None:
+                    order.setdefault(node["location_id"], index)
+        checked = tracked["checked"]
+        candidates = [check for check in self.ctx.get("checks", {}).get(slot, [])
+                      if check["receiver"] != player["name"] and check["id"] not in checked]
+        return sorted(candidates, key=lambda check: (order.get(check["id"], float("inf")), check["id"]))
+
+    def set_left(self, slot, left):
+        with self.lock:
+            if not left:
+                self.left.pop(slot, None)
+            elif slot not in self.left:
+                self.left[slot] = {"since": time.monotonic(), "sent": {}}
+
+    def set_left_interval(self, seconds):
+        if not launcher().valid_left_interval(seconds):
+            low, high = launcher().LEFT_PLAYER_INTERVAL
+            raise ValueError(f"The interval must be a whole number of seconds from {low} to {high}")
+        launcher().save_room_settings({"left_player_interval": seconds})
+        self.left_interval = seconds
+
+    def left_status(self, now=None):
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            entries = {slot: entry["since"] for slot, entry in self.left.items()}
+        return {slot: {"next_in": max(0, round(self.left_interval - (now - since), 1)),
+                       "remaining": len(self.left_candidates(slot))}
+                for slot, since in entries.items()}
+
+    def tick_left(self, now=None):
+        """Grants one remaining check for other players per departed player whose interval elapsed."""
+        now = time.monotonic() if now is None else now
+        server, tracker = self.ctx.get("server"), self.ctx.get("tracker")
+        if server is None or tracker is None or not server.running:
+            return
+        with self.lock:
+            due = [(slot, entry) for slot, entry in self.left.items() if now - entry["since"] >= self.left_interval]
+        for slot, entry in due:
+            tracked = tracker.state.get(slot)
+            if not tracked or not tracked["online"]:
+                continue
+            pending = entry["sent"]
+            for location in [location for location in pending if location in tracked["checked"]]:
+                del pending[location]
+            candidates = [check for check in self.left_candidates(slot)
+                          if check["id"] not in pending or now - pending[check["id"]] >= self.LEFT_RETRY]
+            if not candidates:
+                continue
+            check = candidates[0]
+            name = next(p["name"] for p in self.ctx["graph"]["players"] if p["slot"] == slot)
+            try:
+                server.command(f'/send_location {shlex.quote(name)} {check["id"]}')
+            except (OSError, ValueError) as error:
+                print(f"Could not unlock {check['name']} for {name}: {error}", file=sys.stderr, flush=True)
+                continue
+            with self.lock:
+                pending[check["id"]] = now
+                entry["since"] = now
+
     def watch(self):
         """Reports a game server that stopped on its own."""
         server = self.ctx.get("server")
         if server is not None and not server.running and self.state["phase"] == "running" and not self.state["busy"]:
-            self.update(phase="error", message="The game server stopped unexpectedly. Save in edit mode to start a new seed.",
+            self.update(phase="error", message="The game server stopped unexpectedly. Start server to resume, or edit to start a new seed.",
                         error="\n".join(list(server.log)[-25:]))
 
     def close(self):
@@ -711,7 +822,8 @@ def make_handler(ctx):
                 return self._json({"error": "Editing is unavailable"}, 503)
             if path == "/api/config":
                 return self._json({"players": read_players(room.root),
-                                   "prefer_other_players": launcher().room_settings()["prefer_other_players"]})
+                                   "prefer_other_players": launcher().room_settings()["prefer_other_players"],
+                                   "left_player_interval": room.left_interval})
             try:
                 schema = room.options_schema()
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
@@ -771,6 +883,8 @@ def make_handler(ctx):
                     "log": list(srv.log)[-200:] if self._local() else [],
                     "downloads": ctx["downloads"],
                     "room": room.snapshot() if room else None,
+                    "left": room.left_status() if room and self._local() else {},
+                    "left_interval": room.left_interval if room else None,
                 }))
             if path.startswith("/download/"):
                 name = path[len("/download/"):]
@@ -786,7 +900,8 @@ def make_handler(ctx):
             self._send("not found", "text/plain", 404)
 
         def do_POST(self):
-            if self.path not in ("/api/command", "/api/check", "/api/config"):
+            if self.path not in ("/api/command", "/api/check", "/api/config", "/api/server", "/api/left",
+                                 "/api/room-settings"):
                 return self._send("not found", "text/plain", 404)
             if not self._local():
                 return self._send(json.dumps({"error": "admin commands are only accepted from the host machine"}), status=403)
@@ -798,6 +913,43 @@ def make_handler(ctx):
                 return self._send(json.dumps({"error": "Invalid JSON request"}), status=400)
             if self.path == "/api/config":
                 return self._editor_save(body)
+            if self.path in ("/api/left", "/api/room-settings"):
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json" \
+                        or not self._same_origin():
+                    return self._json({"error": "Expected a same-origin JSON request"}, 403)
+                room = ctx.get("room")
+                if room is None:
+                    return self._json({"error": "Room controls are unavailable"}, 503)
+                if self.path == "/api/room-settings":
+                    try:
+                        room.set_left_interval(body.get("left_player_interval"))
+                    except (OSError, ValueError) as error:
+                        return self._json({"error": str(error)}, 400)
+                    return self._json({"ok": True, "left_player_interval": room.left_interval})
+                if body.get("seed") != ctx["graph"]["seed"]:
+                    return self._json({"error": "The room seed changed. Reload before trying again."}, 409)
+                slot = body.get("slot")
+                if type(slot) is not int or type(body.get("left")) is not bool \
+                        or not any(player["slot"] == slot for player in ctx["graph"]["players"]):
+                    return self._json({"error": "Unknown player or invalid value"}, 400)
+                if not body["left"] and slot in room.left and not room.left_candidates(slot):
+                    return self._json({"error": "All of this player's checks for others are unlocked."}, 409)
+                room.set_left(slot, body["left"])
+                return self._json({"ok": True})
+            if self.path == "/api/server":
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json" \
+                        or not self._same_origin():
+                    return self._json({"error": "Expected a same-origin JSON request"}, 403)
+                room = ctx.get("room")
+                if room is None:
+                    return self._json({"error": "Server controls are unavailable"}, 503)
+                if body.get("seed") != ctx["graph"]["seed"]:
+                    return self._json({"error": "The room seed changed. Reload before trying again."}, 409)
+                if body.get("action") not in ("start", "stop"):
+                    return self._json({"error": "Expected start or stop action"}, 400)
+                if not room.control_server(body["action"]):
+                    return self._json({"error": "The room is busy. Wait for the current operation."}, 409)
+                return self._json({"ok": True}, 202)
             if self.path == "/api/check":
                 slot, location = body.get("slot"), body.get("location")
                 if "seed" in body and body["seed"] != ctx["graph"]["seed"]:
@@ -872,6 +1024,10 @@ def main():
         while True:
             time.sleep(0.5)
             room.watch()
+            try:
+                room.tick_left()
+            except Exception as error:  # A failed automatic unlock must not take the room down.
+                print(f"Automatic unlock failed: {error}", file=sys.stderr, flush=True)
     except KeyboardInterrupt:
         print("\nStopping room and saving progress...", flush=True)
     finally:

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -134,7 +134,8 @@ class EditorTests(unittest.TestCase):
         self.assertTrue((self.root / "inactive-players" / "Multi.yaml").is_file())
         self.assertFalse((self.root / "Multi.yaml").exists())
         self.assertEqual(yaml.safe_load((self.root / "New_Player.yaml").read_text())["Peglin"], {"death_link": True})
-        self.assertEqual(json.loads((self.root / "room-settings.json").read_text()), {"prefer_other_players": False})
+        self.assertEqual(json.loads((self.root / "room-settings.json").read_text()),
+                         {"prefer_other_players": False, "left_player_interval": 60})
 
     def test_invalid_submissions(self):
         for players in ([{"file": "Craig.yaml", "name": "", "game": "Pathogenic"}],
@@ -173,9 +174,11 @@ class RoomSocketTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
-    def post(self, body, content_type="application/json"):
-        request = Request(f"http://{self.url}/api/config", data=json.dumps(body).encode(),
-                          headers={"Content-Type": content_type})
+    def post(self, body, content_type="application/json", path="/api/config", origin=None):
+        headers = {"Content-Type": content_type}
+        if origin:
+            headers["Origin"] = origin
+        request = Request(f"http://{self.url}{path}", data=json.dumps(body).encode(), headers=headers)
         try:
             with urlopen(request) as response:
                 return response.status, json.load(response)
@@ -216,6 +219,146 @@ class RoomSocketTests(unittest.TestCase):
             config = json.load(response)
         self.assertEqual(config["players"][0]["name"], "Craig")
         self.assertTrue(config["prefer_other_players"])
+
+    def test_server_control_requires_local_same_origin_json_and_current_seed(self):
+        self.room.control_server = Mock(return_value=True)
+        body = {"action": "stop", "seed": "S1"}
+        self.assertEqual(self.post(body, path="/api/server"), (202, {"ok": True}))
+        self.room.control_server.assert_called_once_with("stop")
+        self.room.control_server.reset_mock()
+        self.assertEqual(self.post(body, "text/plain", "/api/server")[0], 403)
+        self.assertEqual(self.post(body, path="/api/server", origin="http://evil.example")[0], 403)
+        self.assertEqual(self.post({"action": "stop", "seed": "old"}, path="/api/server")[0], 409)
+        self.assertEqual(self.post({"action": "restart", "seed": "S1"}, path="/api/server")[0], 400)
+        handler = self.server.RequestHandlerClass
+        with patch.object(handler, "_local", return_value=False):
+            self.assertEqual(self.post(body, path="/api/server")[0], 403)
+        self.room.control_server.assert_not_called()
+        self.room.control_server.return_value = False
+        self.assertEqual(self.post(body, path="/api/server")[0], 409)
+
+    def test_stop_and_resume_keep_the_same_campaign(self):
+        server = SimpleNamespace(running=True)
+        self.context.update(server=server, zip="existing.zip",
+                            tracker=SimpleNamespace(state={1: {"online": True, "games": 1, "checked": {42}}}))
+
+        def stop():
+            server.running = False
+
+        def start(campaign):
+            self.assertEqual(campaign, "existing.zip")
+            server.running = True
+
+        self.room.stop_current = Mock(side_effect=stop)
+        self.room.start_campaign = Mock(side_effect=start)
+        self.room._control_server("stop")
+        self.assertFalse(self.context["tracker"].state[1]["online"])
+        self.assertEqual(self.context["tracker"].state[1]["checked"], {42})
+        self.assertEqual(self.room.state["phase"], "stopped")
+        self.room.watch()
+        self.assertEqual(self.room.state["phase"], "stopped")
+        self.room._control_server("start")
+        self.room.start_campaign.assert_called_once_with("existing.zip")
+        self.assertEqual(self.context["graph"]["seed"], "S1")
+        self.assertEqual(self.room.state["phase"], "running")
+        self.assertFalse(self.room.state["busy"])
+
+    def test_server_control_busy_errors_and_start_idempotence(self):
+        self.context["server"] = SimpleNamespace(running=True)
+        self.room.start_campaign = Mock()
+        self.room._control_server("start")
+        self.room.start_campaign.assert_not_called()
+        self.room.state["busy"] = True
+        self.assertFalse(self.room.control_server("stop"))
+        self.assertFalse(self.room.regenerate([], lambda: None, {}))
+        self.room.state["busy"] = False
+        self.room.stop_current = Mock(side_effect=OSError("save failed"))
+        self.room._control_server("stop")
+        self.assertEqual(self.room.state["error"], "save failed")
+        self.assertFalse(self.room.state["busy"])
+
+    def left_room(self):
+        commands = []
+        state = {1: {"online": True, "checked": {10}}, 2: {"online": True, "checked": set()}}
+        self.context.update(
+            graph={"seed": "S1", "players": [{"slot": 1, "name": "Gone Player"}, {"slot": 2, "name": "B"}],
+                   "plans": {"all": {"spheres": [[{"finder": 1, "location_id": 13}], [{"finder": 1, "location_id": 11}]]}}},
+            checks={1: [{"id": i, "name": f"L{i}", "item": "x", "receiver": r}
+                        for i, r in ((10, "B"), (11, "B"), (12, "Gone Player"), (13, "B"), (14, "B"))]},
+            server=SimpleNamespace(running=True, command=commands.append),
+            tracker=SimpleNamespace(state=state))
+        return commands, state
+
+    def test_left_player_unlocks_checks_for_others_one_per_interval(self):
+        commands, state = self.left_room()
+        self.room.left_interval = 60
+        # Unchecked, for other players, progression in sphere order first, then by id; self-items never.
+        self.assertEqual([c["id"] for c in self.room.left_candidates(1)], [13, 11, 14])
+        with patch.object(site.time, "monotonic", return_value=1000):
+            self.room.set_left(1, True)
+        self.room.tick_left(now=1059)
+        self.assertEqual(commands, [])
+        self.room.tick_left(now=1060)
+        self.assertEqual(commands, ["/send_location 'Gone Player' 13"])
+        self.room.tick_left(now=1100)
+        self.assertEqual(len(commands), 1)
+        # A short interval skips the still-unconfirmed unlock until the retry delay and sends the next one.
+        self.room.left_interval = 5
+        self.room.tick_left(now=1080)
+        self.assertEqual(commands[-1], "/send_location 'Gone Player' 11")
+        state[1]["checked"].update({11, 13})
+        self.room.tick_left(now=1085)
+        self.assertEqual(commands[-1], "/send_location 'Gone Player' 14")
+        state[1]["checked"].add(14)
+        self.assertEqual(self.room.left_status(now=1085), {1: {"next_in": 5, "remaining": 0}})
+        self.room.tick_left(now=2000)
+        self.assertEqual(len(commands), 3)
+        self.assertNotIn(12, [int(c.split()[-1]) for c in commands])
+
+    def test_left_player_pauses_when_offline_and_can_be_cleared(self):
+        commands, state = self.left_room()
+        self.room.left_interval = 1
+        self.room.set_left(1, True)
+        self.room.left[1]["since"] = 0
+        state[1]["online"] = False
+        self.room.tick_left(now=10)
+        self.context["server"].running = False
+        state[1]["online"] = True
+        self.room.tick_left(now=10)
+        self.assertEqual(commands, [])
+        self.room.set_left(1, False)
+        self.context["server"].running = True
+        self.room.tick_left(now=10)
+        self.assertEqual(commands, [])
+
+    def test_left_and_interval_endpoints(self):
+        self.left_room()
+        self.assertEqual(self.post({"slot": 1, "left": True, "seed": "S1"}, path="/api/left"), (200, {"ok": True}))
+        self.assertIn(1, self.room.left)
+        for body in ({"slot": 9, "left": True, "seed": "S1"}, {"slot": "1", "left": True, "seed": "S1"},
+                     {"slot": 1, "left": 1, "seed": "S1"}):
+            self.assertEqual(self.post(body, path="/api/left")[0], 400)
+        self.assertEqual(self.post({"slot": 1, "left": False, "seed": "old"}, path="/api/left")[0], 409)
+        self.assertEqual(self.post({"slot": 1, "left": False, "seed": "S1"}, "text/plain", "/api/left")[0], 403)
+        self.assertIn(1, self.room.left)
+        self.assertEqual(self.post({"slot": 1, "left": False, "seed": "S1"}, path="/api/left")[0], 200)
+        self.assertNotIn(1, self.room.left)
+        self.context["tracker"].state[1]["checked"].update({11, 13, 14})
+        self.assertEqual(self.post({"slot": 1, "left": True, "seed": "S1"}, path="/api/left")[0], 200)
+        self.assertEqual(self.post({"slot": 1, "left": False, "seed": "S1"}, path="/api/left")[0], 409)
+        self.assertIn(1, self.room.left)
+        for value in (0, 3601, 1.5, "60", True, None):
+            self.assertEqual(self.post({"left_player_interval": value}, path="/api/room-settings")[0], 400)
+        self.assertEqual(self.post({"left_player_interval": 3600}, path="/api/room-settings"),
+                         (200, {"ok": True, "left_player_interval": 3600}))
+        self.assertEqual(json.loads((self.root / "room-settings.json").read_text())["left_player_interval"], 3600)
+        with urlopen(f"http://{self.url}/api/config") as response:
+            self.assertEqual(json.load(response)["left_player_interval"], 3600)
+        handler = self.server.RequestHandlerClass
+        with patch.object(handler, "_local", return_value=False):
+            self.assertEqual(self.post({"left_player_interval": 5}, path="/api/room-settings")[0], 403)
+            self.assertEqual(self.post({"slot": 1, "left": True, "seed": "S1"}, path="/api/left")[0], 403)
+        self.assertEqual(self.room.left_interval, 3600)
 
 
 if __name__ == "__main__":

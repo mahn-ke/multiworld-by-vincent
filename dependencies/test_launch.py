@@ -140,7 +140,12 @@ class LauncherTests(unittest.TestCase):
             self.assertNotIn("--allow-self-checks", commands[-1])
 
     def test_room_settings_default_and_validation(self):
-        self.assertEqual(launch.room_settings(), {"prefer_other_players": True})
+        self.assertEqual(launch.room_settings(), {"prefer_other_players": True, "left_player_interval": 60})
+        (self.root / launch.SETTINGS_FILE).write_text('{"left_player_interval": 0}')
+        self.assertEqual(launch.room_settings()["left_player_interval"], 60)
+        launch.save_room_settings({"left_player_interval": 3600})
+        launch.save_room_settings({"prefer_other_players": False})
+        self.assertEqual(launch.room_settings(), {"prefer_other_players": False, "left_player_interval": 3600})
         (self.root / launch.SETTINGS_FILE).write_text("{broken")
         with self.assertRaisesRegex(ValueError, "not valid JSON"):
             launch.room_settings()

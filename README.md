@@ -61,14 +61,60 @@ removed in the editor. Edit those files by hand.
 
 ### Checks for other players (on by default)
 
-After the normal fill, items are swapped between worlds so that a check unlocks
-something for **another** player whenever possible. Every game rule is
-respected and the seed stays beatable. Locked locations and players with many
-more locations than everyone else keep some of their own items. Turn this off
+After the normal fill, a best-effort pass swaps items between worlds to spread
+rewards across **other players**, regardless of whether they play the same game.
+It favors underserved finder/recipient pairs over concentrating rewards in a few
+pairs, then minimizes self-items when the spread is equal. This can leave more
+self-items than the absolute minimum, so smaller worlds still reward each other
+instead of exclusively rewarding the largest world. Every game rule is respected
+and the seed stays beatable. Unequal world sizes, locked locations, item restrictions
+and progression rules can limit the spread. Turn this off
 with the editor's checkbox, or set `"prefer_other_players": false` in
-`room-settings.json` beside `start.sh`.
+`room-settings.json` beside `start.sh`. Unchecked uses normal Archipelago
+randomized placement without the extra cross-player pass (game rules still
+apply). Changes apply to the next generated seed, not live checks.
+
+The **Players** section's **Who finds what for whom** table counts all checks
+in the seed, not just progression required by a goal. **Path to the goal** is
+hidden when all goals are already satisfied without items, as with the
+no-logic Pathogenic and Peglin worlds. Actual unreachable goals remain visible.
 
 The host's console and check buttons are only available through localhost.
+Activity uses the full width when the host console is hidden. The header's
+**Downloads: Spoiler Log** link downloads the seed's spoiler text and appears
+only on localhost, right-aligned before the editor button.
+The header fades from its normal background at the screen's midpoint to dark
+green at the right edge when the game server is online, or dark red when
+it is offline or a status request fails. Non-local visitors see right-aligned connection
+guidance using the hostname (or IP) in their browser URL and the game server's
+port, falling back to the server's LAN IP if no browser hostname is available.
+While the game server is offline, visitors' header expands to fill the screen,
+vertically centers its contents and hides the rest of the page; it collapses
+again once the server is back.
+Start/stop progress notices are shown only on localhost.
+On localhost, **Stop server** saves progress and stops only the game server;
+the website remains available. **Start server** resumes the same seed and save.
+Players must reconnect. To reset progress instead, use the editor's
+**Save & start new seed…** workflow. Server controls are disabled while another
+start, stop or generation operation is in progress.
+
+### Players who have left (localhost only)
+
+Each player's card has a **Player has left** checkbox on localhost. While it is
+checked, the room unlocks one of that player's remaining checks **whose item goes
+to another player** every 60 seconds (checks that would reward the departed
+player are never unlocked). Progression items earliest on the path to the goal
+go first. The first unlock happens one interval after checking the box. A bar
+above the checkbox (hidden while unchecked) drains until the next unlock and
+refills after each one. The card also shows how many such checks remain. After
+the last one is unlocked, the bar hides again and the checkbox stays checked and
+locked. Unlocks pause while the game server or that player's tracker is offline. Unchecking stops them.
+The checkbox survives **Stop server**/**Start server**, but it is cleared for a
+new seed or a restart of `start.sh`.
+
+The interval can be changed in the editor (**Unlock interval for players who
+have left**, 1–3600 seconds). It is saved to `room-settings.json`
+(`"left_player_interval"`) and applies immediately; no new seed is needed.
 The website, spoiler and tracker are visible to anyone who can reach its port.
 Only host on a trusted network.
 
@@ -113,6 +159,7 @@ reported with the full log path; a failed generation never hosts an older seed.
 
 ```sh
 python3.11 -m unittest discover -s dependencies -p 'test_*.py'
+node --test dependencies/test_site.js
 ```
 
 The HTTP tracker tests also require `websockets` (installed by the first launch).

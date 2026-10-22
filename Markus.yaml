@@ -1,4 +1,14 @@
 name: Markus
 game: Pathogenic
 description: Created in the website editor.
-Pathogenic: {}
+Pathogenic:
+  shop_unlocks: true
+  item_room_unlocks: true
+  boss_reward_unlocks: true
+  level_up_unlocks: true
+  remote_characters: false
+  remote_plasmids: false
+  remote_loadouts: false
+  remote_organelles: true
+  start_with_all_characters: true
+  death_link: false

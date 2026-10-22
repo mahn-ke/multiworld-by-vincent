@@ -104,9 +104,16 @@ def sync_worlds(engine: Path) -> None:
         shutil.copy2(source, custom / source.name)
 
 
+LEFT_PLAYER_INTERVAL = (1, 3600)  # seconds between automatic unlocks for a player who has left
+
+
+def valid_left_interval(value) -> bool:
+    return type(value) is int and LEFT_PLAYER_INTERVAL[0] <= value <= LEFT_PLAYER_INTERVAL[1]
+
+
 def room_settings() -> dict:
-    """Room-wide generation settings edited from the website (room-settings.json beside start.sh)."""
-    settings = {"prefer_other_players": True}
+    """Room-wide settings edited from the website (room-settings.json beside start.sh)."""
+    settings = {"prefer_other_players": True, "left_player_interval": 60}
     path = ROOT / SETTINGS_FILE
     if path.is_file():
         try:
@@ -115,11 +122,20 @@ def room_settings() -> dict:
             raise ValueError(f"{path} is not valid JSON: {error}") from error
         if isinstance(stored, dict) and isinstance(stored.get("prefer_other_players"), bool):
             settings["prefer_other_players"] = stored["prefer_other_players"]
+        if isinstance(stored, dict) and valid_left_interval(stored.get("left_player_interval")):
+            settings["left_player_interval"] = stored["left_player_interval"]
     return settings
 
 
 def save_room_settings(settings: dict) -> None:
-    (ROOT / SETTINGS_FILE).write_text(json.dumps(settings, indent=2) + "\n")
+    """Updates the given settings, keeping the others."""
+    try:
+        current = room_settings()
+    except ValueError:
+        current = {}
+    temporary = ROOT / f".{SETTINGS_FILE}.tmp"
+    temporary.write_text(json.dumps({**current, **settings}, indent=2) + "\n")
+    temporary.replace(ROOT / SETTINGS_FILE)
 
 
 def generate(python: Path, engine: Path, files: list[Path], environment: dict[str, str], **options) -> Path:

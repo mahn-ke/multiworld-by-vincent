@@ -8,8 +8,33 @@
   :root { --bg:#14161c; --panel:#1d2029; --line:#2c303c; --text:#e6e6e6; --dim:#9aa0ad; --prog:#c39bff; --useful:#6fb7ff; --loc:#5ee0a0; --goal:#ffcf4a; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system, "Segoe UI", sans-serif; }
-  header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; gap:24px; align-items:baseline; flex-wrap:wrap; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; gap:24px; align-items:baseline; flex-wrap:wrap; position:relative; isolation:isolate; overflow:clip;
+    min-height:0; transition:min-height .9s cubic-bezier(.65,0,.35,1); }
+  /* Visitors only see the header while the game server is offline. */
+  html.closed { overflow:hidden; }
+  html.closed header { min-height:100vh; align-content:center; align-items:center; }
+  /* The outgoing color fades while the incoming one pans in (see the pulse animation below).
+     Layers are 140% wide: the header-width part is the resting gradient (transparent at 50%, full at 100%),
+     the clipped extra 40% is a soft tail so the pulse has no hard right edge while it slides in. */
+  header::before, header::after { content:""; position:absolute; inset:0 -40% 0 0; z-index:-1; pointer-events:none; opacity:0; transition:opacity 1s ease .5s; }
+  header::before { background:linear-gradient(to right, transparent 35.71%, #153326 71.43%, transparent 100%); }
+  header::after { background:linear-gradient(to right, transparent 35.71%, #381c21 71.43%, transparent 100%); }
+  header.online::before, header.offline::after { opacity:1; }
+  header.pulse.online::before, header.pulse.offline::after { animation:header-pulse 1.6s cubic-bezier(.16,1,.3,1); }
+  @keyframes header-pulse {
+    from { transform:translateX(-100%); filter:brightness(2.6) saturate(1.6); opacity:1; }
+    to { transform:none; filter:none; opacity:1; }
+  }
   header h1 { margin:0; font-size:20px; }
+  #connection-status { margin-left:auto; transition:opacity .6s ease; }
+  #connection-status.fading { opacity:0; }
+  .header-actions:has(> #edit-open[hidden]):has(> #downloads[hidden]) { display:none; }
+  .header-actions { margin-left:auto; display:flex; gap:24px; align-items:baseline; }
+  #server-error { color:#ff927e; }
+  @media (prefers-reduced-motion:reduce) {
+    header, header::before, header::after, #connection-status { transition:none; }
+    header.pulse.online::before, header.pulse.offline::after { animation:none; }
+  }
   .dim { color:var(--dim); }
   code { background:#0d0f14; padding:2px 6px; border-radius:4px; }
   main { padding:16px 24px; display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }
@@ -24,6 +49,13 @@
   .check-row input { margin-top:5px; }
   .check-row small { display:block; color:var(--dim); }
   .check-row.done { opacity:.65; }
+  .left-toggle { display:block; margin:2px 0 2px; }
+  .left-toggle small { display:block; color:var(--dim); margin-left:22px; }
+  .left-toggle:has(input:disabled) { cursor:default; }
+  .left-bar { height:6px; background:#0d0f14; border-radius:3px; overflow:hidden; margin:10px 0 0; opacity:0; transition:opacity .4s ease; }
+  .left-bar.on { opacity:1; }
+  .left-bar div { height:100%; width:100%; background:#ff927e; }
+  .pill.left { background:#381c21; color:#ffb3a6; }
   .warning { color:var(--goal); }
   dialog { width:min(520px, calc(100% - 32px)); background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:24px; }
   dialog::backdrop { background:#0009; }
@@ -54,6 +86,7 @@
   #cmd { width:100%; background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-family:ui-monospace, Menlo, monospace; margin-top:8px; }
   a { color:var(--useful); }
   .two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
+  .two:has(> #admin[hidden]) { grid-template-columns:minmax(0,1fr); }
   @media (max-width:900px) { .two { grid-template-columns:1fr; } }
   button.act { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 14px; cursor:pointer; }
   button.act.primary { border-color:var(--goal); color:var(--goal); }
@@ -81,6 +114,8 @@
   .opt select { max-width:100%; }
   .opt textarea { width:100%; min-height:54px; font:12px ui-monospace, Menlo, monospace; }
   .opt .bad { border-color:#ff927e; }
+  #left-interval { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:4px 6px; font:inherit; }
+  #left-interval.bad { border-color:#ff927e; }
   .opt .pair { display:flex; gap:6px; }
   .ed-card h4 { margin:10px 0 2px; font-size:12px; text-transform:uppercase; color:var(--dim); letter-spacing:.05em; }
   .ed-card details > summary { cursor:pointer; margin-top:8px; }
@@ -88,11 +123,15 @@
 </style>
 </head>
 <body>
-<header>
-  <h1>Multiworld <span id="seed" class="dim"></span></h1>
-  <div>Server: <code id="addr">…</code> <span id="srv" class="pill"></span></div>
-  <div id="downloads" class="dim"></div>
-  <div style="margin-left:auto"><button id="edit-open" class="act" hidden>Edit players &amp; settings</button></div>
+<header id="header">
+  <h1>Multiworld</h1>
+  <div id="host-status" hidden>Server: <code id="addr">…</code> <button id="srv" class="act" disabled>Start server</button>
+    <span id="server-error" role="alert"></span></div>
+  <div id="connection-status" role="status" hidden></div>
+  <div class="header-actions">
+    <div id="downloads" class="dim" hidden></div>
+    <button id="edit-open" class="act" hidden>Edit players &amp; settings</button>
+  </div>
 </header>
 <main id="main">
   <section id="room" hidden>
@@ -106,23 +145,30 @@
   <section id="editor" hidden>
     <h2>Edit players &amp; settings</h2>
     <div class="toolbar">
-      <label title="After the normal fill, items are swapped between worlds (respecting every game rule and keeping the seed beatable) so a check unlocks something for another player whenever possible. Players with many more locations than everyone else still keep some of their own items."><input type="checkbox" id="prefer-others" checked>
-        Checks unlock items for <b>other players</b> whenever possible</label>
+      <label title="After the normal fill, a best-effort pass swaps items between worlds while respecting game rules and beatability. Unequal world sizes, locked locations and game rules can require self-items. Uncheck for normal randomized placement without this extra preference. Applies to the next seed only."><input type="checkbox" id="prefer-others" checked>
+        Spread rewards across <b>other players</b>, minimizing self-items within that goal</label>
       <span class="grow"></span>
       <button id="ed-add" class="act">+ Add player</button>
       <button id="ed-cancel" class="act">Cancel</button>
       <button id="ed-save" class="act primary">Save &amp; start new seed…</button>
     </div>
-    <p class="dim" style="margin:8px 0 0">Changes are written to the player YAMLs beside <code>start.sh</code> only after the new seed generated successfully.
-      Edited files are rewritten without their comments. Removed players are moved to <code>inactive-players/</code>. Hover a setting for its description.</p>
+    <p class="dim">Unchecked: normal randomized placement, without an extra cross-player preference. Game rules still apply. This setting applies to the next seed only.</p>
+    <div class="toolbar">
+      <label for="left-interval" title="When a player's card has &quot;Player has left&quot; checked, one of their remaining checks that rewards another player is unlocked every this many seconds.">
+        Unlock interval for players who have left (seconds)</label>
+      <input type="number" id="left-interval" min="1" max="3600" step="1" value="60" style="width:110px">
+      <span id="left-interval-status" class="dim" role="status"></span>
+    </div>
+    <p class="dim">1 second to 1 hour. Saved and applied immediately to the running seed; no new seed is needed.</p>
     <p id="ed-error" class="ed-error" role="alert"></p>
     <fieldset id="ed-fields" style="border:0;padding:0;margin:0"><div class="ed-cards" id="ed-cards"></div></fieldset>
   </section>
   <section>
     <h2>Players</h2>
     <div class="cards" id="cards"></div>
+    <div class="lists" id="distribution"></div>
   </section>
-  <section>
+  <section id="goal-path" hidden>
     <h2>Path to the goal</h2>
     <div class="tabs" id="tabs"></div>
     <p class="dim" style="margin:8px 0 0">One line per player. Columns are spheres: everything in a column can be found once the earlier columns are found.
@@ -153,6 +199,13 @@
 <script>
 const COLORS = ["#ff7a59", "#5ec8ff", "#8be36f", "#d58cff", "#ffd25e", "#ff6fae", "#5ff0d4"];
 let graph, checks, selectedCheck, cardSignature, sendingCheck = false, status = {players:{}}, plan = "all";
+// Expected `running` value after a start/stop request; the button stays locked until a poll confirms it.
+let pendingServer = null;
+let shownOnline = null, messageTimer = null;
+// The new text starts fading in during the last part of the 1.6s pulse, finishing with it.
+const TEXT_IN_MS = 1000;
+const SERVER_PHASES = ["stopping", "starting", "stopped"];
+const isLocal = () => status.admin ?? ["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname);
 const expanded = new Set();
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -160,6 +213,31 @@ const color = slot => COLORS[(slot - 1) % COLORS.length];
 const pname = slot => graph.players.find(p => p.slot == slot)?.name ?? slot;
 const pgame = slot => graph.players.find(p => p.slot == slot)?.game ?? "";
 const found = n => n.location_id != null && (status.players[n.finder]?.checked || []).includes(n.location_id);
+const duration = seconds => {
+  const s = Math.max(0, Math.round(seconds ?? 0)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60;
+  return [h && `${h} h`, m && `${m} min`, (r || !(h || m)) && `${r} s`].filter(Boolean).join(" ");
+};
+const leftErrors = {};
+// slot -> {at: performance.now() of the status poll, next: seconds until the next unlock then, paused}
+const leftTimers = {};
+const leftPaused = slot => !status.server?.running || !status.players[slot]?.tracking;
+function leftRemaining(slot, now = performance.now()) {
+  const timer = leftTimers[slot], interval = status.left_interval || 1;
+  if (!timer) return interval;
+  const rest = timer.next - (now - timer.at) / 1000;
+  // Between polls, assume the unlock happened on time and the next interval started.
+  return rest > 0 || timer.paused ? Math.max(0, rest) : interval - (-rest % interval);
+}
+function tickLeft() {
+  document.querySelectorAll(".left-bar[data-slot]").forEach(bar => {
+    const slot = Number(bar.dataset.slot), timer = leftTimers[slot];
+    if (!timer) return;
+    const rest = leftRemaining(slot);
+    bar.firstElementChild.style.width = `${Math.min(100, 100 * rest / (status.left_interval || 1))}%`;
+    const next = bar.parentElement.querySelector(`[data-left-next="${slot}"]`);
+    if (next) next.textContent = duration(Math.ceil(rest));
+  });
+}
 
 async function loadSeed() {
   const nextGraph = await (await fetch("/api/graph")).json();
@@ -170,9 +248,12 @@ async function loadSeed() {
   graph = nextGraph;
   if (!graph.plans[plan]) plan = "all";
   cardSignature = null;
-  $("seed").textContent = graph.seed;
-  const tabs = [["all", "Everyone's goal"], ...graph.players.map(p => [String(p.slot), `${p.name}'s goal`])];
+  const goalPlayers = graph.players.filter(p => graph.plans.all.goal_sphere[p.slot] !== 0);
+  $("goal-path").hidden = !goalPlayers.length;
+  if (plan !== "all" && !goalPlayers.some(p => String(p.slot) === plan)) plan = "all";
+  const tabs = [["all", "Everyone's goal"], ...goalPlayers.map(p => [String(p.slot), `${p.name}'s goal`])];
   $("tabs").innerHTML = tabs.map(([k, t]) => `<button data-k="${k}">${esc(t)}</button>`).join("");
+  drawDistribution();
 }
 
 async function load() {
@@ -181,6 +262,7 @@ async function load() {
   connectSocket();
   await poll();
   setInterval(poll, 3000);
+  setInterval(tickLeft, 100);
 }
 
 let reloading = null;
@@ -191,22 +273,97 @@ function reloadSeed() {
 
 async function poll() {
   let next;
-  try { next = await (await fetch("/api/status")).json(); } catch { return; }
+  try {
+    const response = await fetch("/api/status");
+    if (!response.ok) throw new Error(`Server status request failed (${response.status})`);
+    next = await response.json();
+  } catch (error) {
+    console.warn("Could not reach the room server", error);
+    drawHeader(false);
+    return;
+  }
   if (next.room) showRoom(next.room);
   if (next.server.seed !== graph.seed) return reloadSeed();
   status = next;
-  const s = status.server;
-  $("addr").textContent = `${s.lan}:${s.port}`;
-  const phase = status.room?.phase;
-  $("srv").textContent = phase && phase !== "running" && phase !== "error" ? phase + "…" : s.running ? "running" : "stopped";
-  $("edit-open").hidden = !status.admin;
-  $("downloads").innerHTML = "Downloads: " + status.downloads.map(d => `<a href="/download/${encodeURIComponent(d)}">${esc(d)}</a>`).join(" · ");
+  if (pendingServer !== null && !status.room?.busy
+      && (status.server.running === pendingServer || status.room?.phase === "error")) pendingServer = null;
+  drawHeader();
   drawCards(); draw(); drawFeed(); drawAdmin();
 }
 
+function drawHeader(online = status.server?.running ?? false) {
+  const local = isLocal();
+  const header = $("header"), changed = shownOnline !== null && shownOnline !== online;
+  if (changed) {
+    header.classList.remove("pulse");
+    void header.offsetWidth; // restart the animation if a pulse is still running
+    header.classList.add("pulse");
+  }
+  header.classList.toggle("online", online);
+  header.classList.toggle("offline", !online);
+  const closed = !local && !online;
+  if (closed && !document.documentElement.classList.contains("closed")) globalThis.scrollTo?.(0, 0);
+  document.documentElement.classList.toggle("closed", closed);
+  shownOnline = online;
+  $("host-status").hidden = !local;
+  $("connection-status").hidden = local;
+  const hostname = location.hostname || status.server?.lan;
+  const address = hostname && status.server ? `${hostname}:${status.server.port}` : "";
+  const message = online
+    ? `Server online! Connect to <code>${esc(address)}</code> and join!`
+    : "Server offline! Waiting for host to start...";
+  const box = $("connection-status");
+  box.dataset.message = message;
+  const reduced = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  if (changed && !reduced) {
+    box.classList.add("fading");
+    clearTimeout(messageTimer);
+    messageTimer = setTimeout(() => {
+      messageTimer = null;
+      box.innerHTML = box.dataset.message;
+      box.classList.remove("fading");
+    }, TEXT_IN_MS);
+  } else if (messageTimer === null) {
+    box.innerHTML = message;
+  }
+  const s = status.server;
+  $("addr").textContent = s ? `${s.lan}:${s.port}` : "…";
+  $("srv").textContent = online ? "Stop server" : "Start server";
+  $("srv").disabled = pendingServer !== null || !!status.room?.busy || !status.server;
+  $("edit-open").hidden = !local;
+  const spoiler = local && status.downloads?.find(d => d.endsWith("_Spoiler.txt"));
+  $("downloads").hidden = !spoiler;
+  $("downloads").innerHTML = spoiler ? `Downloads: <a href="/download/${encodeURIComponent(spoiler)}">Spoiler Log</a>` : "";
+}
+
+$("srv").onclick = async () => {
+  const start = !status.server.running;
+  pendingServer = start;
+  $("server-error").textContent = "";
+  drawHeader();
+  try {
+    const response = await fetch("/api/server", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action: start ? "start" : "stop", seed: graph.seed})});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not change the server state");
+    await poll();
+  } catch (error) {
+    pendingServer = null;
+    $("server-error").textContent = error.message;
+    drawHeader();
+  }
+};
+
 function drawCards() {
-  const signature = JSON.stringify([status.players, status.admin, status.server.running]);
-  if (signature === cardSignature) return;
+  const now = performance.now();
+  Object.keys(leftTimers).forEach(slot => delete leftTimers[slot]);
+  Object.entries(status.admin && status.left || {}).forEach(([slot, left]) => {
+    if (left.remaining) leftTimers[slot] = {at: now, next: left.next_in, paused: leftPaused(slot)};
+  });
+  // The countdown is animated by tickLeft, so it is not part of the signature.
+  const left = Object.fromEntries(Object.entries(status.left || {}).map(([slot, l]) => [slot, l.remaining]));
+  const signature = JSON.stringify([status.players, status.admin, status.server.running, left, status.left_interval]);
+  if (signature === cardSignature) return tickLeft();
   cardSignature = signature;
   const scroll = new Map([...document.querySelectorAll(".checklist")].map(list => [list.dataset.slot, list.scrollTop]));
   $("cards").innerHTML = graph.players.map(p => {
@@ -223,12 +380,23 @@ function drawCards() {
           aria-label="${esc(check.name)}" title="${done ? "Already found. This cannot be unchecked." : "Unlock this location"}">
         <span>${esc(check.name)}<small>${esc(check.item)} → ${esc(check.receiver)}</small></span></label>`;
     }).join("");
+    const left = status.admin ? status.left?.[p.slot] : null, finished = !!left && !left.remaining;
+    const leftInfo = !left ? esc(`Unlocks one of their remaining checks that reward other players every ${duration(status.left_interval)}.`)
+      : finished ? "All their checks for other players are unlocked."
+      : `${left.remaining} check(s) for other players remain · next unlock in <span data-left-next="${p.slot}">${esc(duration(left.next_in))}</span>` +
+        (leftPaused(p.slot) ? " (paused while the server or tracker is offline)" : "");
+    const leftBox = status.admin ? `<div class="left-bar ${left && !finished ? "on" : ""}" data-slot="${p.slot}"><div></div></div>
+      <label class="left-toggle"><input type="checkbox" data-left="${p.slot}" ${left ? "checked" : ""} ${finished ? "disabled" : ""}>
+        Player has left<small>${leftInfo}</small></label>` +
+      (leftErrors[p.slot] ? `<p class="ed-error" role="alert">${esc(leftErrors[p.slot])}</p>` : "") : "";
     return `<details class="card" data-slot="${p.slot}" ${expanded.has(p.slot) ? "open" : ""} style="--c:${color(p.slot)}">
       <summary><b>${esc(p.name)}</b> <span class="dim">${esc(p.game)}</span>
       <span class="pill ${st.status == 30 ? "goal" : ""}" style="float:right">${esc(st.status_name ?? "…")}</span>
+      ${left ? '<span class="pill left" style="float:right;margin-right:6px" title="Player has left; their checks for others unlock automatically">left</span>' : ""}
       <div class="bar"><div style="width:${pct}%"></div></div>
       <div class="dim">${n} / ${p.locations} checks · ${st.received ?? 0} items received · click to expand</div></summary>
       <div style="margin-top:4px;font-size:12px">${how}</div>
+      ${leftBox}
       <p class="warning">Found checks cannot be unchecked. Games may permanently retain received items.</p>
       ${!status.admin ? '<p class="dim">Only the host can unlock checks.</p>' : ""}
       <div class="checklist" data-slot="${p.slot}">${rows}</div></details>`;
@@ -239,11 +407,13 @@ function drawCards() {
     if (card.open) expanded.add(slot); else expanded.delete(slot);
   }));
   document.querySelectorAll(".checklist").forEach(list => { list.scrollTop = scroll.get(list.dataset.slot) || 0; });
+  tickLeft();
   [...$("tabs").children].forEach(b => b.classList.toggle("on", b.dataset.k === plan));
 }
 
 $("cards").addEventListener("change", event => {
   const input = event.target;
+  if (input.matches("input[data-left]")) return setLeft(Number(input.dataset.left), input.checked, input);
   if (!input.matches('input[data-location]')) return;
   input.checked = false;
   const slot = Number(input.dataset.slot);
@@ -253,6 +423,22 @@ $("cards").addEventListener("change", event => {
   $("unlock-dialog").showModal();
 });
 $("unlock-cancel").onclick = () => $("unlock-dialog").close();
+
+async function setLeft(slot, left, input) {
+  input.disabled = true;
+  delete leftErrors[slot];
+  try {
+    const response = await fetch("/api/left", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({slot, left, seed: graph.seed})});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not change the player's state");
+  } catch (error) {
+    leftErrors[slot] = error.message;
+  }
+  cardSignature = null;
+  await poll();
+  if (cardSignature === null && status.server) drawCards();
+}
 $("unlock-dialog").addEventListener("cancel", event => { if (sendingCheck) event.preventDefault(); });
 $("unlock-confirm").onclick = async () => {
   if (sendingCheck || !selectedCheck) return;
@@ -275,11 +461,11 @@ $("unlock-confirm").onclick = async () => {
 };
 
 function draw() {
-  if (!graph) return;
+  if (!graph || $("goal-path").hidden) return;
   [...$("tabs").children].forEach(b => b.classList.toggle("on", b.dataset.k === plan));
   const P = graph.plans[plan], players = graph.players;
   // Column 0 is the start; keep only spheres with visible items or a goal.
-  const goals = P.goal_sphere, targets = P.targets.map(String);
+  const goals = P.goal_sphere, targets = P.targets.map(String).filter(t => goals[t] !== 0);
   const cols = [{sphere: 0, nodes: []}];
   P.spheres.forEach((sp, i) => {
     const nodes = sp.filter(n => !n.event);
@@ -348,15 +534,22 @@ function draw() {
   drawLists(P, players, targets);
 }
 
+function drawDistribution() {
+  const players = graph.players;
+  const m = {};
+  players.forEach(f => (checks[f.slot] || []).forEach(check => {
+    const key = JSON.stringify([f.slot, check.receiver]);
+    m[key] = (m[key] || 0) + 1;
+  }));
+  $("distribution").innerHTML = `<div><b>Who finds what for whom</b> <span class="dim">(rows find, columns receive; all checks)</span><table class="m"><tr><th></th>${players.map(p => `<th style="color:${color(p.slot)}">${esc(p.name)}</th>`).join("")}</tr>` +
+    players.map(f => `<tr><th style="color:${color(f.slot)}">${esc(f.name)}</th>${players.map(r => `<td>${m[JSON.stringify([f.slot, r.name])] || 0}</td>`).join("")}</tr>`).join("") + "</table></div>";
+}
+
 function drawLists(P, players, targets) {
   const all = P.spheres.flatMap((sp, i) => sp.filter(n => !n.event).map(n => ({...n, sphere: i + 1})));
-  const m = {};
-  all.forEach(n => { m[n.finder + ">" + n.receiver] = (m[n.finder + ">" + n.receiver] || 0) + 1; });
-  let html = `<div><b>Who finds what for whom</b> <span class="dim">(rows find, columns receive)</span><table class="m"><tr><th></th>${players.map(p => `<th style="color:${color(p.slot)}">${esc(p.name)}</th>`).join("")}</tr>` +
-    players.map(f => `<tr><th style="color:${color(f.slot)}">${esc(f.name)}</th>${players.map(r => `<td>${m[f.slot + ">" + r.slot] || ""}</td>`).join("")}</tr>`).join("") + "</table></div>";
   const open = all.filter(n => !found(n));
   const next = open.length ? open.filter(n => n.sphere === Math.min(...open.map(o => o.sphere))) : [];
-  html += `<div><b>Up next</b> <span class="dim">(earliest still-missing items on this path)</span><ul>` +
+  let html = `<div><b>Up next</b> <span class="dim">(earliest still-missing items on this path)</span><ul>` +
     (next.length ? next.map(n => `<li><span style="color:${color(n.finder)}">${esc(pname(n.finder))}</span> checks <span class="k-location">${esc(n.location)}</span> → <span class="k-prog">${esc(n.item)}</span> for <span style="color:${color(n.receiver)}">${esc(pname(n.receiver))}</span></li>`).join("")
       : "<li>Nothing left. Every listed item has been found.</li>") + "</ul></div>";
   html += `<div><b>Remaining per player</b><ul>` + players.map(p => {
@@ -378,8 +571,8 @@ function drawFeed() {
 }
 
 function drawAdmin() {
+  $("admin").hidden = !status.admin;
   if (!status.admin) return;
-  $("admin").hidden = false;
   const box = $("log"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 5;
   box.textContent = status.log.join("\n");
   if (stick) box.scrollTop = box.scrollHeight;
@@ -419,9 +612,10 @@ function showRoom(state) {
   if (state.busy && previous && !previous.busy) { $("gen-log").textContent = ""; showSuccess = false; }
   if (awaiting === "pending" && state.busy) awaiting = "running";
   if (awaiting === "running" && !state.busy) finishSave(state);
-  const titles = {generating: "Generating a new seed", stopping: "Stopping the previous game server",
-    starting: "Starting the new game server", error: "Problem", running: "Room"};
-  const visible = state.busy || state.error || state.phase !== "running" || showSuccess;
+  const titles = {generating: "Generating a new seed", stopping: "Stopping the game server",
+    starting: "Starting the game server", stopped: "Game server stopped", error: "Problem", running: "Room"};
+  const visible = (state.busy || state.error || state.phase !== "running" || showSuccess)
+    && (isLocal() || !SERVER_PHASES.includes(state.phase));
   $("room").hidden = !visible;
   $("room").classList.toggle("error", !!state.error);
   $("room-title").textContent = titles[state.phase] || state.phase;
@@ -431,6 +625,9 @@ function showRoom(state) {
   $("room-error").textContent = state.error || "";
   $("room-dismiss").hidden = state.busy;
   $("ed-save").disabled = state.busy;
+  $("srv").disabled = pendingServer !== null || state.busy || !status.server;
+  // Finished operations are confirmed by a fresh status poll before the button unlocks.
+  if (previous?.busy && !state.busy && pendingServer !== null) poll();
 }
 
 $("room-dismiss").onclick = () => { showSuccess = false; $("room").hidden = true; if (roomState) roomState = {...roomState, error: null}; };
@@ -470,6 +667,9 @@ $("edit-open").onclick = async () => {
     editor = {games, players: config.players.map(p => ({...p, origGame: p.game, origName: p.name, set: {}, unset: new Set(),
       remove: false, isNew: false, open: true}))};
     $("prefer-others").checked = config.prefer_other_players;
+    $("left-interval").value = config.left_player_interval;
+    $("left-interval").classList.remove("bad");
+    $("left-interval-status").textContent = "";
     await Promise.all(editor.players.map(p => p.editable && schemaFor(p.game)));
     renderEditor();
   } catch (error) {
@@ -486,6 +686,27 @@ function closeEditor() {
   poll();
 }
 $("ed-cancel").onclick = closeEditor;
+
+$("left-interval").onchange = async () => {
+  const input = $("left-interval"), seconds = Number(input.value), info = $("left-interval-status");
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) {
+    input.classList.add("bad");
+    info.textContent = "Enter a whole number from 1 to 3600.";
+    return;
+  }
+  input.classList.remove("bad");
+  info.textContent = "Saving…";
+  try {
+    const response = await fetch("/api/room-settings", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({left_player_interval: seconds})});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Saving failed");
+    info.textContent = `Saved: every ${duration(result.left_player_interval)}.`;
+  } catch (error) {
+    input.classList.add("bad");
+    info.textContent = error.message;
+  }
+};
 
 $("ed-add").onclick = async () => {
   if (!editor) return;
@@ -574,7 +795,6 @@ function cardHTML(p, index) {
       <select data-game="${index}" aria-label="Game">${games.map(g => `<option ${g === p.game ? "selected" : ""}>${esc(g)}${editor.games.includes(g) ? "" : " (not installed)"}</option>`).join("")}</select>
       <span class="dim">${label}</span><span style="flex:1"></span><button class="link" data-remove="${index}">remove</button></div>
     <div class="ed-error" data-problem="${index}">${esc(problem)}</div>
-    ${p.origGame && p.game !== p.origGame ? `<p class="warning">Switching from ${esc(p.origGame)} discards that game's settings in this file.</p>` : ""}
     <details ${p.open ? "open" : ""} data-open="${index}"><summary>Settings for ${esc(p.game)}</summary>${settingsHTML(p, index)}</details></div>`;
 }
 

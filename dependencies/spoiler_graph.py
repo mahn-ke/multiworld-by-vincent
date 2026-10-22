@@ -5,8 +5,8 @@ For "all" and for each slot, the graph lists only the progression items that
 are needed to reach the goal (pruned like Archipelago's spoiler playthrough),
 grouped into spheres, with who finds each item and who receives it.
 
-By default, items are afterwards moved so that as many checks as possible
-unlock something for another player (see cross_player.py). Pass
+By default, items are afterwards spread across other players, minimizing
+self-items within that distribution goal (see cross_player.py). Pass
 --allow-self-checks to keep Archipelago's normal placement.
 """
 import argparse
@@ -108,8 +108,8 @@ def install_cross_player_pass():
             moved, remaining = cross_player.prefer_other_players(
                 multiworld, CollectionState(multiworld), valid, players, seed=multiworld.seed,
                 log=lambda text: print(text, flush=True))
-            print(f"Cross-player placement: moved {moved} self-placed item(s) to other players, "
-                  f"{remaining} could not be moved ({time.time() - started:.1f}s)", flush=True)
+            print(f"Cross-player placement: {moved + remaining} -> {remaining} self-placed item(s) "
+                  f"after spreading rewards across other players ({time.time() - started:.1f}s)", flush=True)
         return original(multiworld, method_name, *args)
 
     AutoWorld.call_all = call_all
