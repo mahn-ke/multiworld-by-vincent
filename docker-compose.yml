@@ -1,0 +1,21 @@
+#http
+services:
+  app:
+    image: ghcr.io/mahn-ke/multiworld-by-vincent:latest
+    restart: on-failure:5
+    init: true
+    stop_grace_period: 30s
+    environment:
+      - OAUTH_URL=${OAUTH_URL}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+      - OIDC_PUBLIC_URL=https://multiworld.by.vincent.mahn.ke
+      # Game clients connect through the website's HTTPS port; the room tunnels them to the game server.
+      - MULTIWORLD_GAME_ADDRESS=multiworld.by.vincent.mahn.ke:443
+    ports:
+      - "127.0.0.1:3020:8085"
+    volumes:
+      - data:/data
+
+volumes:
+  data:

@@ -143,6 +143,29 @@ test("visitors see the browser hostname or IP with the game port and no host act
   }
 });
 
+test("a public game address replaces host and port, and an empty room says so", () => {
+  const ui = headerSetup(false);
+  ui.run(`status.server.address = "multiworld.example:443"; status.versions = {archipelago: "0.6.8",
+    worlds: [{file: "peglin.apworld", tag: "v1.2.0"}]}; drawHeader()`);
+  assert.equal(ui.element("connection-status").innerHTML,
+    "Server online! Connect to <code>multiworld.example:443</code> and join!");
+  assert.equal(ui.element("versions").textContent, "Archipelago 0.6.8 · peglin v1.2.0");
+  ui.run("status.server.running = false; status.server.seed = null; drawHeader()");
+  ui.flushTimers();
+  assert.equal(ui.element("connection-status").innerHTML, "No game yet! Waiting for the host to add players...");
+  assert.equal(ui.element("srv").disabled, true);
+});
+
+test("an empty room shows no players and no distribution table", async () => {
+  const ui = setup();
+  ui.graph.players = [];
+  ui.graph.seed = null;
+  await ui.run("loadSeed()");
+  assert.equal(ui.element("distribution").innerHTML, "");
+  ui.run(`document.querySelectorAll = () => []; status = {admin: false, server: {running: false, lan: "x", port: 1, seed: null}, players: {}}; drawCards()`);
+  assert.match(ui.element("cards").innerHTML, /No players yet/);
+});
+
 test("server control sends the current seed, disables duplicate clicks and surfaces failures", async () => {
   const ui = headerSetup(true);
   await ui.run("loadSeed()");

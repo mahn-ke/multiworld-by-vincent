@@ -1,4 +1,4 @@
-"""Portable fresh-seed launcher. All persistent paths are relative to this bundle."""
+"""Portable launcher. Persistent paths are relative to this bundle, or to MULTIWORLD_ROOT when set."""
 
 import argparse
 from datetime import datetime
@@ -13,12 +13,18 @@ import socket
 import subprocess
 import sys
 import tarfile
-import tempfile
+from urllib.error import URLError
 import uuid
 
-ROOT = Path(__file__).resolve().parent.parent
-DEPS = ROOT / "dependencies"
+import sources
+
+APP = Path(__file__).resolve().parent
+ROOT = Path(os.environ.get("MULTIWORLD_ROOT") or APP.parent).resolve()
 SETTINGS_FILE = "room-settings.json"
+
+
+def cache_dir() -> Path:
+    return Path(os.environ.get("MULTIWORLD_CACHE") or ROOT / ".cache")
 
 
 def player_files(root: Path) -> list[Path]:
@@ -49,26 +55,58 @@ def check_ports(web_port: int, ap_port: int) -> None:
 
 
 def runtime(cache: Path) -> Path:
-    archive = DEPS / "archipelago-0.6.8.tar.gz"
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()[:16]
-    target = cache / f"runtime-{digest}"
-    if not target.exists():
-        with tempfile.TemporaryDirectory(prefix="extract-", dir=cache) as temporary:
-            staging = Path(temporary)
-            with tarfile.open(archive) as source:
-                source.extractall(staging, filter="data")
-            for name in ("Generate.py", "MultiServer.py", "worlds", "LICENSE"):
-                if not (staging / name).exists():
-                    raise ValueError(f"Bundled runtime is missing {name}")
-            staging.rename(target)
+    """Archipelago source: MULTIWORLD_RUNTIME (prepared in the Docker image) or a download of the
+    latest release (ARCHIPELAGO_VERSION pins a tag), cached per tag. Offline, the newest cached one is used."""
+    if os.environ.get("MULTIWORLD_RUNTIME"):
+        target = Path(os.environ["MULTIWORLD_RUNTIME"])
+    else:
+        requested = os.environ.get("ARCHIPELAGO_VERSION", "latest")
+        try:
+            tag = sources.latest_archipelago_tag() if requested in ("", "latest") else sources.safe_tag(requested)
+        except (OSError, URLError, ValueError, KeyError) as error:
+            cached = sorted(cache.glob("runtime-*/ARCHIPELAGO_VERSION"), key=lambda path: path.stat().st_mtime)
+            if not cached:
+                raise RuntimeError(f"Could not look up the latest Archipelago release: {error}") from error
+            target = cached[-1].parent
+            print(f"Could not look up the latest Archipelago release ({error}); using cached "
+                  f"{sources.runtime_version(target)}", file=sys.stderr, flush=True)
+        else:
+            target = cache / f"runtime-{tag}"
+            if not (target / "ARCHIPELAGO_VERSION").is_file():
+                sources.download_runtime(tag, target)
     if not (target / "Generate.py").is_file() or not (target / "MultiServer.py").is_file():
         raise ValueError(f"Runtime is incomplete: {target}")
     return target
 
 
+def worlds_dir() -> Path:
+    """Custom games fetched from GitHub (MULTIWORLD_WORLDS in the Docker image)."""
+    return Path(os.environ.get("MULTIWORLD_WORLDS") or cache_dir() / "worlds")
+
+
+def update_worlds() -> None:
+    """Fetches the custom games released in MULTIWORLD_WORLDS_ORG (default mahnkepelago). Keeps the
+    previous download when GitHub is unreachable. Skipped when MULTIWORLD_WORLDS is preset."""
+    if os.environ.get("MULTIWORLD_WORLDS"):
+        return
+    org = os.environ.get("MULTIWORLD_WORLDS_ORG", sources.WORLDS_ORG)
+    if not org:
+        return
+    print(f"Custom games released in {org}:", flush=True)
+    try:
+        sources.fetch_worlds(org, worlds_dir())
+    except (OSError, URLError, ValueError, KeyError) as error:
+        print(f"Could not update custom games from {org} ({error}); using the previous download.",
+              file=sys.stderr, flush=True)
+
+
 def python_environment(cache: Path) -> Path:
-    requirements = [DEPS / "requirements.txt"]
-    extra = DEPS / "requirements-extra.txt"
+    if os.environ.get("MULTIWORLD_SYSTEM_PYTHON") == "1":
+        python = Path(sys.executable)
+        subprocess.run([str(python), "-c", "import yaml, websockets, jinja2, jellyfish, schema, orjson"], check=True)
+        return python
+    requirements = [APP / "requirements.txt"]
+    extra = APP / "requirements-extra.txt"
     if extra.exists():
         requirements.append(extra)
     identity = json.dumps([str(ROOT), sys.executable, sys.version,
@@ -93,15 +131,26 @@ def python_environment(cache: Path) -> Path:
 def sync_worlds(engine: Path) -> None:
     custom = engine / "custom_worlds"
     custom.mkdir(exist_ok=True)
-    supplied = sorted((DEPS / "worlds").glob("*.apworld"))
-    supplied.extend(sorted(ROOT.glob("*.apworld")))
-    names = [path.name for path in supplied]
-    if len(names) != len(set(names)):
-        raise ValueError("Duplicate .apworld filename in root and dependencies/worlds; keep only one copy.")
+    supplied = {path.name: path for path in sorted(worlds_dir().glob("*.apworld"))}
+    for path in sorted(ROOT.glob("*.apworld")):
+        if path.name in supplied:
+            print(f"Using {path} instead of the released {path.name}", flush=True)
+        supplied[path.name] = path
     for previous in custom.glob("*.apworld"):
         previous.unlink()
-    for source in supplied:
-        shutil.copy2(source, custom / source.name)
+    for name, source in supplied.items():
+        shutil.copy2(source, custom / name)
+
+
+def latest_campaign() -> Path | None:
+    """The seed recorded in latest.json, if its files still exist."""
+    try:
+        campaign = ROOT / json.loads((ROOT / "latest.json").read_text())["campaign"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if campaign.is_file() and campaign.with_suffix(".graph.json").is_file():
+        return campaign
+    return None
 
 
 LEFT_PLAYER_INTERVAL = (1, 3600)  # seconds between automatic unlocks for a player who has left
@@ -165,7 +214,7 @@ def generate_inputs(python: Path, engine: Path, inputs: list[tuple[str, bytes]],
         print(f"  {source}", flush=True)
     if prefer_other_players:
         print("Preferring checks that unlock items for other players.", flush=True)
-    command = [str(python), str(DEPS / "spoiler_graph.py")]
+    command = [str(python), str(APP / "spoiler_graph.py")]
     if not prefer_other_players:
         command.append("--allow-self-checks")
     command += [str(players), str(output)]
@@ -198,11 +247,12 @@ def generate_inputs(python: Path, engine: Path, inputs: list[tuple[str, bytes]],
     return campaign
 
 
-def serve(python: Path, engine: Path, campaign: Path, args: argparse.Namespace,
+def serve(python: Path, engine: Path, campaign: Path | None, args: argparse.Namespace,
           environment: dict[str, str]) -> None:
-    command = [str(python), "-u", str(DEPS / "room.py"), "--runtime", str(engine),
-               "--campaign", str(campaign), "--web-port", str(args.web_port),
-               "--ap-port", str(args.ap_port)]
+    command = [str(python), "-u", str(APP / "room.py"), "--runtime", str(engine),
+               "--web-port", str(args.web_port), "--ap-port", str(args.ap_port)]
+    if campaign is not None:
+        command += ["--campaign", str(campaign)]
     process = subprocess.Popen(command, env=environment, start_new_session=True)
 
     def stop(signum, _frame):
@@ -231,10 +281,21 @@ def main() -> None:
     parser.add_argument("--web-port", type=int, default=8085)
     parser.add_argument("--ap-port", type=int, default=38281)
     parser.add_argument("--generate-only", action="store_true", help="Generate and validate a new seed without hosting")
+    parser.add_argument("--resume", action="store_true",
+                        help="Host the seed from latest.json with its saved progress instead of generating a new one")
+    parser.add_argument("--allow-empty", action="store_true",
+                        help="Without player YAMLs, start an empty room where admins add players on the website")
     args = parser.parse_args()
-    files = player_files(ROOT)
-    cache = ROOT / ".cache"
-    cache.mkdir(exist_ok=True)
+    campaign = latest_campaign() if args.resume and not args.generate_only else None
+    files = []
+    if campaign is None:
+        try:
+            files = player_files(ROOT)
+        except ValueError:
+            if not args.allow_empty or args.generate_only:
+                raise
+    cache = cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
     with (cache / "launcher.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -243,13 +304,20 @@ def main() -> None:
         if not args.generate_only:
             check_ports(args.web_port, args.ap_port)
         engine = runtime(cache)
+        print(f"Archipelago {sources.runtime_version(engine) or 'unknown version'}", flush=True)
         python = python_environment(cache)
+        update_worlds()
         sync_worlds(engine)
-        environment = {**os.environ, "SKIP_REQUIREMENTS_UPDATE": "1"}
-        campaign = generate(python, engine, files, environment)
-        print(f"Fresh seed: {campaign.name}\nSaved in: {campaign.parent.parent}", flush=True)
+        environment = {**os.environ, "SKIP_REQUIREMENTS_UPDATE": "1", "MULTIWORLD_ROOT": str(ROOT)}
+        if campaign is not None:
+            print(f"Resuming seed: {campaign.name}", flush=True)
+        elif files:
+            campaign = generate(python, engine, files, environment)
+            print(f"Fresh seed: {campaign.name}\nSaved in: {campaign.parent.parent}", flush=True)
+        else:
+            print("No player YAMLs yet. Admins add players with Edit on the website.", flush=True)
         if not args.generate_only:
-            print("Stop with Ctrl+C. Starting again creates another NEW seed.", flush=True)
+            print("Stop with Ctrl+C." + ("" if args.resume else " Starting again creates another NEW seed."), flush=True)
             serve(python, engine, campaign, args, environment)
 
 

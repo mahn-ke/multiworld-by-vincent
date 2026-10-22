@@ -1,11 +1,14 @@
 # MultiWorldGG portable room
 
+Hosted at <https://multiworld.by.vincent.mahn.ke> (see [Docker deployment](#docker-deployment)),
+or run locally with `./start.sh`.
+
 ## Start a new multiworld
 
 1. Install **Python 3.11.13+, 3.12, or 3.13** (not 3.14). macOS/Linux, Bash,
    Python's `venv` and `pip` are required.
 2. Put all player `.yaml` / `.yml` files directly beside `start.sh`.
-   Pathogenic and Peglin examples are included. Remove either to omit that player.
+   Or start without any and add players with **Edit** (`./start.sh --allow-empty`).
 3. Run:
 
    ```sh
@@ -22,7 +25,7 @@ Craig's Pathogenic configuration enables `start_with_all_characters`. With the
 updated Pathogenic client, the campaign starts with the full roster unlocked.
 This ignores `remote_characters` and omits character items, their randomized
 shipments and their optional Earn checks. Other categories remain unchanged.
-The bundled APWorld supports the option; generate a new seed to apply it.
+Generate a new seed to apply it.
 Changing these files does not change an already running room.
 
 - Website / tracker: <http://localhost:8085/>
@@ -37,6 +40,7 @@ Override ports or Python when needed:
 ./start.sh --web-port 8086 --ap-port 38286
 PYTHON=python3.13 ./start.sh
 ./start.sh --generate-only
+./start.sh --resume        # host the latest seed again instead of generating one
 ```
 
 ### Edit mode (new seed without restarting)
@@ -148,16 +152,16 @@ everyone out; roles are re-checked whenever the access token is refreshed.
 
 ## Moving or sharing
 
-Copy **`start.sh` + `dependencies/` + your YAMLs** together to any folder,
+Copy **`start.sh` + `app/` + your YAMLs** together to any folder,
 including paths with spaces. You can instead copy this whole directory.
 There are no links to the original workspace, no bundled credentials, and no
 dependencies on its old runtime or virtual environment.
 
-The first launch installs Python packages from PyPI and needs internet.
-The generator source (Archipelago 0.6.8, matching the existing working rooms),
-tracker, and Pathogenic/Peglin custom worlds are bundled in `dependencies/`.
-The source archive retains its upstream license. Game mods are not installed by
-this launcher; install the matching game clients separately.
+The first launch needs internet: it downloads the latest Archipelago release
+(`https://github.com/ArchipelagoMW/Archipelago/archive/refs/tags/<tag>.tar.gz`;
+pin one with `ARCHIPELAGO_VERSION=0.6.8`), the [custom games](#more-games) and
+the Python packages. Later launches reuse the cache and work offline. Game mods
+are not installed by this launcher; install the matching game clients separately.
 
 `.cache/` contains generated local runtime and Python environments. It need not
 be copied. Moving the directory or switching Python rebuilds the environment
@@ -172,22 +176,72 @@ by `start.sh`.
 ## More games
 
 Add more YAMLs beside `start.sh`; changing a YAML or adding/removing players is
-picked up on the next invocation. For additional custom games, put their
-`.apworld` files in `dependencies/worlds/` (or beside `start.sh`). Do not install
-two files with the same name in both places. Custom worlds are executable Python;
-use trusted packages compatible with Archipelago 0.6.8.
+picked up on the next invocation.
+
+Custom games come from the GitHub organization
+[mahnkepelago](https://github.com/mahnkepelago): every public repository whose
+latest release has an `.apworld` asset (verified against a `SHA256SUMS` asset,
+if present) is installed. `./start.sh` refreshes them on every launch and keeps
+the previous download when GitHub is unreachable; the Docker image fetches them
+when it is built. Set `MULTIWORLD_WORLDS_ORG` to use another organization (empty
+disables it), or `MULTIWORLD_WORLDS=/path` to use a fixed folder of `.apworld`
+files instead. An `.apworld` beside `start.sh` overrides a released one with the
+same file name. Custom worlds are executable Python; only use trusted sources.
+
+To add a game, create a public repository in the organization and publish a
+release with `<game>.apworld` and `SHA256SUMS` assets, then rebuild the image
+(push to this repository or re-run its deploy workflow).
 
 The included Python requirements cover headless hosting for Pathogenic and
 Peglin. Other games may require extra Python packages, ROMs or game-specific
-setup. Add their pip requirements to `dependencies/requirements-extra.txt`;
+setup. Add their pip requirements to `app/requirements-extra.txt`;
 the launcher detects this and prepares a new environment. Generation errors are
 reported with the full log path; a failed generation never hosts an older seed.
+
+## Docker deployment
+
+`app/Dockerfile` builds the image the [mahn-ke](https://github.com/mahn-ke)
+deploy workflow publishes as `ghcr.io/mahn-ke/multiworld-by-vincent` and runs
+with `docker-compose.yml` behind `https://multiworld.by.vincent.mahn.ke`. Every
+build downloads the latest Archipelago release (build argument
+`ARCHIPELAGO_VERSION`) and the organization's games (`WORLDS_ORG`). The `test`
+stage runs the unit tests and generates a smoke-test seed with them.
+
+- The room keeps its YAMLs, seeds and settings in the `/data` volume. A new,
+  empty volume starts an idle room; an admin adds players with **Edit**. After
+  a restart the latest seed is hosted again with its progress.
+- Players connect their game clients to **`multiworld.by.vincent.mahn.ke:443`**.
+  The website forwards WebSocket connections on any path except `/ws` to the
+  game server, so only the HTTPS port is published. Clients must use
+  `wss://` (most try it first; Peglin needs `wss://` explicitly).
+- Login uses the Keycloak client provisioned for the repository (`OAUTH_URL`,
+  `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`). Inside the container localhost is
+  not trusted (`MULTIWORLD_TRUST_LOCALHOST=0`), so only Keycloak admins get the
+  host controls. Set `OIDC_POST_LOGOUT_REDIRECT=0` if Keycloak rejects the
+  post-logout redirect.
+
+Build and run it locally:
+
+```sh
+docker build -t multiworld app
+docker run --rm -p 8085:8085 -v multiworld:/data \
+  -e OAUTH_URL=https://sso.example.com/realms/my-realm -e OAUTH_CLIENT_ID=... -e OAUTH_CLIENT_SECRET=... \
+  multiworld
+```
+
+Without the `OAUTH_*` variables nobody gets the host controls, because requests
+through a published port do not come from the container's localhost.
+
+Other environment variables: `MULTIWORLD_GAME_ADDRESS` (public `host:port`
+shown to players), `OIDC_PUBLIC_URL` (public URL behind a reverse proxy).
 
 ## Tests
 
 ```sh
-python3.11 -m unittest discover -s dependencies -p 'test_*.py'
-node --test dependencies/test_site.js
+cd app
+python3.11 -m unittest test_launch test_room test_oidc test_cross_player test_hosting
+node --test test_site.js
+docker build --target test .
 ```
 
 The HTTP tracker tests also require `websockets` (installed by the first launch).

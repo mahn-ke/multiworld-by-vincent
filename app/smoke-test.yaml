@@ -1,0 +1,4 @@
+# Used by the Docker test stage to check that the downloaded Archipelago can generate a seed.
+name: Smoke
+game: ChecksFinder
+ChecksFinder: {}

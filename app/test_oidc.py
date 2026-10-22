@@ -192,7 +192,24 @@ class LoginEndpointTests(unittest.TestCase):
 
     def test_missing_config_file_disables_login(self):
         with tempfile.TemporaryDirectory() as root:
-            self.assertIsNone(oidc.load(Path(root)))
+            self.assertIsNone(oidc.load(Path(root), environ={}))
+
+    def test_environment_config_and_logout_without_redirect(self):
+        with tempfile.TemporaryDirectory() as root:
+            auth = oidc.load(Path(root), environ={"OAUTH_URL": ISSUER, "OAUTH_CLIENT_ID": "room",
+                                                  "OAUTH_CLIENT_SECRET": "s3cret",
+                                                  "OIDC_PUBLIC_URL": "https://room.example/",
+                                                  "OIDC_POST_LOGOUT_REDIRECT": "0"})
+            (Path(root) / oidc.CONFIG_FILE).write_text(json.dumps({"issuer": ISSUER, "client_id": "file"}))
+            self.assertEqual(oidc.load(Path(root), environ={"OAUTH_URL": ISSUER}).client_id, "file")
+        self.assertEqual((auth.issuer, auth.client_id, auth.client_secret), (ISSUER, "room", "s3cret"))
+        self.assertEqual(auth.base_url("internal:8085", "http"), "https://room.example")
+        auth._fetch = self.provider
+        query = parse_qs(urlparse(auth.logout(None, auth.base_url("x", "http"))).query)
+        self.assertEqual(query, {"client_id": ["room"]})
+        self.context["oidc"].post_logout_redirect = True
+        query = parse_qs(urlparse(self.context["oidc"].logout(None, "https://room.example")).query)
+        self.assertEqual(query["post_logout_redirect_uri"], ["https://room.example/"])
 
     def test_localhost_needs_no_login(self):
         with patch.object(self.server.RequestHandlerClass, "_local", return_value=True):

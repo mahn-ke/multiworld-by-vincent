@@ -185,7 +185,8 @@
   <div class="two">
     <section><h2>Activity</h2><div id="feed"></div></section>
     <section id="admin" hidden><h2>Server console (host &amp; admins only)</h2><div id="log"></div>
-      <input id="cmd" placeholder="/send Peglin Orbelisk · /send_location Peglin ... · /hint ... · /status · /forfeit ... (Enter to run)"></section>
+      <input id="cmd" placeholder="/send Peglin Orbelisk · /send_location Peglin ... · /hint ... · /status · /forfeit ... (Enter to run)">
+      <p id="versions" class="dim"></p></section>
   </div>
 </main>
 <dialog id="unlock-dialog" aria-labelledby="unlock-title">
@@ -217,6 +218,9 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const color = slot => COLORS[(slot - 1) % COLORS.length];
 const pname = slot => graph.players.find(p => p.slot == slot)?.name ?? slot;
+// The public game address (e.g. host:443 through the website's TLS proxy) when configured, else this host's port.
+const gameAddress = (hostname = status.server?.lan) => status.server?.address || `${hostname}:${status.server?.port}`;
+const noSeed = () => status.server?.seed === null;
 const pgame = slot => graph.players.find(p => p.slot == slot)?.game ?? "";
 const found = n => n.location_id != null && (status.players[n.finder]?.checked || []).includes(n.location_id);
 const duration = seconds => {
@@ -314,9 +318,10 @@ function drawHeader(online = status.server?.running ?? false) {
   $("host-status").hidden = !local;
   $("connection-status").hidden = local;
   const hostname = location.hostname || status.server?.lan;
-  const address = hostname && status.server ? `${hostname}:${status.server.port}` : "";
+  const address = status.server && (status.server.address || hostname) ? gameAddress(hostname) : "";
   const message = online
     ? `Server online! Connect to <code>${esc(address)}</code> and join!`
+    : noSeed() ? "No game yet! Waiting for the host to add players..."
     : "Server offline! Waiting for host to start...";
   const box = $("connection-status");
   box.dataset.message = message;
@@ -333,9 +338,12 @@ function drawHeader(online = status.server?.running ?? false) {
     box.innerHTML = message;
   }
   const s = status.server;
-  $("addr").textContent = s ? `${s.lan}:${s.port}` : "…";
+  $("addr").textContent = s ? (s.address ? `${s.address} (${s.lan}:${s.port})` : `${s.lan}:${s.port}`) : "…";
   $("srv").textContent = online ? "Stop server" : "Start server";
-  $("srv").disabled = pendingServer !== null || !!status.room?.busy || !status.server;
+  $("srv").disabled = pendingServer !== null || !!status.room?.busy || !status.server || noSeed();
+  const versions = status.versions;
+  $("versions").textContent = versions ? `Archipelago ${versions.archipelago || "?"}` + (versions.worlds?.length
+    ? " · " + versions.worlds.map(w => `${w.file.replace(/\.apworld$/, "")} ${w.tag}`).join(" · ") : "") : "";
   $("edit-open").hidden = !local;
   $("login").hidden = !status.auth?.login;
   $("signed-in").hidden = !status.auth?.user;
@@ -378,9 +386,10 @@ function drawCards() {
   $("cards").innerHTML = graph.players.map(p => {
     const st = status.players[p.slot] || {checked: []};
     const n = st.checked.length, pct = p.locations ? 100 * n / p.locations : 0;
-    const how = p.game === "Peglin" ? `Options → Multiworld: <code>ws://${status.server.lan}:${status.server.port}</code>, slot <code>${esc(p.name)}</code>`
-      : p.game.startsWith("Pokemon") ? `Patch: <a href="/download/${encodeURIComponent(status.downloads.find(d => d.includes("_P" + p.slot + "_")) || "")}">download</a>, then BizHawk + client → <code>${status.server.lan}:${status.server.port}</code>`
-      : `Connect slot <code>${esc(p.name)}</code> to <code>${status.server.lan}:${status.server.port}</code>`;
+    const address = esc(gameAddress());
+    const how = p.game === "Peglin" ? `Options → Multiworld: <code>${status.server.address ? "wss" : "ws"}://${address}</code>, slot <code>${esc(p.name)}</code>`
+      : p.game.startsWith("Pokemon") ? `Patch: <a href="/download/${encodeURIComponent(status.downloads.find(d => d.includes("_P" + p.slot + "_")) || "")}">download</a>, then BizHawk + client → <code>${address}</code>`
+      : `Connect slot <code>${esc(p.name)}</code> to <code>${address}</code>`;
     const rows = (checks[p.slot] || []).map(check => {
       const done = st.checked.includes(check.id);
       return `<label class="check-row ${done ? "done" : ""}">
@@ -409,7 +418,7 @@ function drawCards() {
       <p class="warning">Found checks cannot be unchecked. Games may permanently retain received items.</p>
       ${!status.admin ? '<p class="dim">Only the host can unlock checks.</p>' : ""}
       <div class="checklist" data-slot="${p.slot}">${rows}</div></details>`;
-  }).join("");
+  }).join("") || '<p class="dim">No players yet.</p>';
   document.querySelectorAll(".card").forEach(card => card.addEventListener("toggle", () => {
     if (!card.isConnected) return;
     const slot = Number(card.dataset.slot);
@@ -545,6 +554,7 @@ function draw() {
 
 function drawDistribution() {
   const players = graph.players;
+  if (!players.length) return $("distribution").innerHTML = "";
   const m = {};
   players.forEach(f => (checks[f.slot] || []).forEach(check => {
     const key = JSON.stringify([f.slot, check.receiver]);
@@ -634,7 +644,7 @@ function showRoom(state) {
   $("room-error").textContent = state.error || "";
   $("room-dismiss").hidden = state.busy;
   $("ed-save").disabled = state.busy;
-  $("srv").disabled = pendingServer !== null || state.busy || !status.server;
+  $("srv").disabled = pendingServer !== null || state.busy || !status.server || noSeed();
   // Finished operations are confirmed by a fresh status poll before the button unlocks.
   if (previous?.busy && !state.busy && pendingServer !== null) poll();
 }

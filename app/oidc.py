@@ -1,10 +1,13 @@
 """Optional OpenID Connect login (e.g. Keycloak) that grants remote users the host's admin controls.
 
-Configured by oidc.json beside start.sh. Without that file only localhost is admin, as before.
+Configured by oidc.json beside start.sh, or else by the OAUTH_URL, OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET
+environment variables (plus optional OIDC_PUBLIC_URL and OIDC_POST_LOGOUT_REDIRECT=0). Without either,
+only localhost is admin, as before.
 """
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
 import threading
@@ -41,10 +44,18 @@ def jwt_claims(token: str) -> dict:
     return claims
 
 
-def load(root: Path):
+def load(root: Path, environ=None):
+    environ = os.environ if environ is None else environ
     path = Path(root) / CONFIG_FILE
     if not path.is_file():
-        return None
+        if not environ.get("OAUTH_URL"):
+            return None
+        config = {"issuer": environ["OAUTH_URL"], "client_id": environ.get("OAUTH_CLIENT_ID"),
+                  "client_secret": environ.get("OAUTH_CLIENT_SECRET") or None,
+                  "public_url": environ.get("OIDC_PUBLIC_URL") or None}
+        if environ.get("OIDC_POST_LOGOUT_REDIRECT"):
+            config["post_logout_redirect"] = environ["OIDC_POST_LOGOUT_REDIRECT"].lower() not in ("0", "false", "no")
+        return OIDC(config, source="OAUTH_* environment variables")
     try:
         config = json.loads(path.read_text())
     except ValueError as error:
@@ -79,6 +90,9 @@ class OIDC:
                 for names in client_roles.values()):
             raise ValueError(f"{source}: \"admin_client_roles\" must map client IDs to lists of role names")
         self.admin_roles, self.admin_client_roles = set(roles), client_roles
+        self.post_logout_redirect = config.get("post_logout_redirect", True)
+        if not isinstance(self.post_logout_redirect, bool):
+            raise ValueError(f"{source}: \"post_logout_redirect\" must be true or false")
         self._fetch = fetch or self._http
         self._metadata = None
         self.lock = threading.Lock()
@@ -248,7 +262,9 @@ class OIDC:
             return None
         if not endpoint:
             return None
-        query = {"client_id": self.client_id, "post_logout_redirect_uri": f"{base_url}/"}
+        query = {"client_id": self.client_id}
+        if self.post_logout_redirect:
+            query["post_logout_redirect_uri"] = f"{base_url}/"
         if session and session.get("id_token"):
             query["id_token_hint"] = session["id_token"]
         return f"{endpoint}?{urlencode(query)}"

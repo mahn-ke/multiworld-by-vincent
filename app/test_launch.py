@@ -1,12 +1,13 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("launcher", Path(__file__).with_name("launch.py"))
 launch = importlib.util.module_from_spec(spec)
@@ -35,14 +36,18 @@ class LauncherTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="multiworld tests ")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.deps = self.root / "dependencies"
+        self.deps = self.root / "app"
         self.deps.mkdir()
         self.engine = self.root / "engine"
         self.engine.mkdir()
+        self.worlds = self.root / "released-worlds"
+        self.worlds.mkdir()
         self.environment = {}
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(("MULTIWORLD_", "ARCHIPELAGO_"))}
+        environment["MULTIWORLD_WORLDS"] = str(self.worlds)
         self.patches = [
             patch.object(launch, "ROOT", self.root),
-            patch.object(launch, "DEPS", self.deps),
+            patch.dict(os.environ, environment, clear=True),
         ]
         for patched in self.patches:
             patched.start()
@@ -71,18 +76,91 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unavailable"):
                 launch.check_ports(port, 2 if port != 2 else 3)
 
-    def test_sync_worlds_and_duplicate_names(self):
-        worlds = self.deps / "worlds"
-        worlds.mkdir()
-        (worlds / "one.apworld").write_bytes(b"one")
+    def test_sync_worlds_prefers_local_copies_over_released_ones(self):
+        (self.worlds / "one.apworld").write_bytes(b"one")
         (self.root / "two.apworld").write_bytes(b"two")
+        (self.engine / "custom_worlds").mkdir()
+        (self.engine / "custom_worlds" / "stale.apworld").touch()
         launch.sync_worlds(self.engine)
         self.assertEqual(sorted(path.name for path in (self.engine / "custom_worlds").iterdir()),
                          ["one.apworld", "two.apworld"])
-        (self.root / "one.apworld").touch()
-        with self.assertRaisesRegex(ValueError, "Duplicate"):
-            launch.sync_worlds(self.engine)
-        self.assertEqual((self.engine / "custom_worlds" / "one.apworld").read_bytes(), b"one")
+        (self.root / "one.apworld").write_bytes(b"local")
+        launch.sync_worlds(self.engine)
+        self.assertEqual((self.engine / "custom_worlds" / "one.apworld").read_bytes(), b"local")
+
+    def test_runtime_preset_download_and_offline_fallback(self):
+        cache = self.root / ".cache"
+        cache.mkdir()
+        for name in ("Generate.py", "MultiServer.py"):
+            (self.engine / name).touch()
+        with patch.dict(os.environ, {"MULTIWORLD_RUNTIME": str(self.engine)}):
+            self.assertEqual(launch.runtime(cache), self.engine)
+
+        def download(tag, target):
+            target.mkdir()
+            for name in ("Generate.py", "MultiServer.py"):
+                (target / name).touch()
+            (target / "ARCHIPELAGO_VERSION").write_text(tag)
+            return target
+
+        with patch.object(launch.sources, "latest_archipelago_tag", return_value="0.7.0"), \
+                patch.object(launch.sources, "download_runtime", side_effect=download) as fetched:
+            self.assertEqual(launch.runtime(cache), cache / "runtime-0.7.0")
+            self.assertEqual(launch.runtime(cache), cache / "runtime-0.7.0")
+        fetched.assert_called_once()
+        with patch.dict(os.environ, {"ARCHIPELAGO_VERSION": "0.6.9"}), \
+                patch.object(launch.sources, "download_runtime", side_effect=download):
+            self.assertEqual(launch.runtime(cache), cache / "runtime-0.6.9")
+        with patch.object(launch.sources, "latest_archipelago_tag", side_effect=OSError("offline")):
+            self.assertIn(launch.runtime(cache).name, ("runtime-0.7.0", "runtime-0.6.9"))
+            for path in cache.glob("runtime-*"):
+                (path / "ARCHIPELAGO_VERSION").unlink()
+            with self.assertRaisesRegex(RuntimeError, "latest Archipelago release"):
+                launch.runtime(cache)
+
+    def test_latest_campaign_requires_existing_seed_files(self):
+        self.assertIsNone(launch.latest_campaign())
+        campaign = self.root / "runs" / "r" / "output" / "AP_1.zip"
+        campaign.parent.mkdir(parents=True)
+        (self.root / "latest.json").write_text(json.dumps({"campaign": "runs/r/output/AP_1.zip"}))
+        self.assertIsNone(launch.latest_campaign())
+        campaign.touch()
+        campaign.with_suffix(".graph.json").write_text("{}")
+        self.assertEqual(launch.latest_campaign(), campaign)
+
+    def run_main(self, *argv):
+        served = Mock()
+        with patch.object(launch.sys, "argv", ["launch.py", *argv]), \
+                patch.object(launch, "cache_dir", return_value=self.root / ".cache"), \
+                patch.object(launch, "check_ports"), \
+                patch.object(launch, "runtime", return_value=self.engine), \
+                patch.object(launch, "python_environment", return_value=Path("python")), \
+                patch.object(launch, "update_worlds"), \
+                patch.object(launch, "sync_worlds"), \
+                patch.object(launch, "generate", return_value=self.root / "new.zip") as generated, \
+                patch.object(launch, "serve", served):
+            launch.main()
+        return served.call_args.args[2] if served.called else None, generated
+
+    def test_main_resumes_generates_or_starts_empty(self):
+        with self.assertRaisesRegex(ValueError, "No player YAMLs"):
+            self.run_main()
+        campaign, generated = self.run_main("--allow-empty")
+        self.assertIsNone(campaign)
+        generated.assert_not_called()
+        (self.root / "a.yaml").touch()
+        campaign, generated = self.run_main("--resume")
+        self.assertEqual(campaign, self.root / "new.zip")
+        saved = self.root / "runs" / "AP_1.zip"
+        saved.parent.mkdir()
+        saved.touch()
+        saved.with_suffix(".graph.json").touch()
+        (self.root / "latest.json").write_text(json.dumps({"campaign": "runs/AP_1.zip"}))
+        campaign, generated = self.run_main("--resume")
+        self.assertEqual(campaign, saved)
+        generated.assert_not_called()
+        campaign, generated = self.run_main()
+        self.assertEqual(campaign, self.root / "new.zip")
 
     def test_each_generation_has_isolated_inputs_and_relative_metadata(self):
         inputs = [self.root / "a.yaml", self.root / ".b.YML"]
@@ -160,6 +238,9 @@ class LauncherTests(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertIn(str(self.engine), command)
             self.assertIn("new.zip", command)
+            with self.assertRaisesRegex(RuntimeError, "status 1"):
+                launch.serve(Path("python"), self.engine, None, args, {})
+            self.assertNotIn("--campaign", popen.call_args.args[0])
 
 
 if __name__ == "__main__":

@@ -28,9 +28,13 @@ from urllib.parse import parse_qs, unquote
 import websockets
 
 import oidc
+import sources
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT = Path(DIR).parent
+ROOT = Path(os.environ.get("MULTIWORLD_ROOT") or Path(DIR).parent).resolve()
+# Inside a container, proxied requests may arrive from a loopback address; set 0 so only signed-in admins are trusted.
+TRUST_LOCALHOST = os.environ.get("MULTIWORLD_TRUST_LOCALHOST", "1") != "0"
+EMPTY_GRAPH = {"seed": None, "players": [], "plans": {"all": {"goal_sphere": {}, "targets": [], "spheres": []}}}
 AP = None
 STATUS_NAMES = {0: "not connected", 5: "connected", 10: "ready", 20: "playing", 30: "goal reached"}
 MAX_NAME_LENGTH = 16  # Archipelago's slot name limit
@@ -160,7 +164,7 @@ class Tracker:
                     await ws.send(json.dumps([{
                         "cmd": "Connect", "game": "", "name": player["name"], "password": None,
                         "uuid": str(uuid.uuid4()), "items_handling": 7, "tags": ["Tracker"],
-                        "slot_data": False, "version": {"major": 0, "minor": 6, "build": 8, "class": "Version"}}]))
+                        "slot_data": False, "version": client_version()}]))
                     key = f"_read_client_status_0_{slot}"
                     async for raw in ws:
                         for msg in json.loads(raw):
@@ -239,6 +243,13 @@ class Tracker:
 
 
 _launch = None
+
+
+def client_version():
+    """The tracker announces the runtime's Archipelago version."""
+    version = (sources.runtime_version(AP) if AP else None) or "0.6.8"
+    major, minor, build = ([int(part) for part in re.findall(r"\d+", version)][:3] + [0, 0, 0])[:3]
+    return {"major": major, "minor": minor, "build": build, "class": "Version"}
 
 
 def launcher():
@@ -541,6 +552,11 @@ class Room:
             return self.schema[1]
 
     # -- seed lifecycle
+    def idle(self):
+        """No seed yet: an empty room whose admins add players in the editor to create the first seed."""
+        self.ctx.update(graph=copy.deepcopy(EMPTY_GRAPH), graph_path=None, zip=None, downloads=[], checks={},
+                        server=Server(None, self.port), tracker=Tracker(f"ws://127.0.0.1:{self.port}", []))
+
     def start_campaign(self, zip_path):
         """Starts MultiServer for a seed, waits until it listens and attaches a fresh tracker."""
         zip_path = os.path.abspath(zip_path)
@@ -610,6 +626,8 @@ class Room:
                 for player in self.ctx["tracker"].state.values():
                     player.update(online=False, games=0)
             elif not self.ctx["server"].running:
+                if not self.ctx.get("zip"):
+                    raise ValueError("There is no seed yet. Use Edit players & settings to create the first one.")
                 self.stop_current()
                 self.start_campaign(self.ctx["zip"])
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
@@ -779,7 +797,7 @@ def make_handler(ctx):
             self.wfile.write(body)
 
         def _local(self):
-            return self.client_address[0] in ("127.0.0.1", "::1")
+            return TRUST_LOCALHOST and self.client_address[0] in ("127.0.0.1", "::1")
 
         def _cookie(self, name):
             jar = SimpleCookie()
@@ -875,6 +893,48 @@ def make_handler(ctx):
             finally:
                 room.detach(client)
 
+        def _tunnel(self):
+            """Relays a game client's WebSocket to the game server, so it is reachable through the website's
+            port (e.g. wss://host:443 behind a TLS proxy)."""
+            self.protocol_version = "HTTP/1.1"  # WebSocket clients only parse HTTP/1.1 error responses.
+            self.close_connection = True
+            room = ctx.get("room")
+            server = ctx.get("server")
+            if room is None or server is None or not server.running:
+                return self._send("The game server is not running", "text/plain", 503)
+            try:
+                upstream = socket.create_connection(("127.0.0.1", room.port), timeout=5)
+            except OSError:
+                return self._send("The game server is not reachable", "text/plain", 502)
+            upstream.settimeout(None)
+            self.close_connection = True
+            head = f"{self.command} {self.path} {self.request_version}\r\n" + "".join(
+                f"{key}: {value}\r\n" for key, value in self.headers.items()) + "\r\n"
+            try:
+                upstream.sendall(head.encode("latin-1"))
+            except (OSError, UnicodeEncodeError):
+                upstream.close()
+                return self._send("Could not reach the game server", "text/plain", 502)
+
+            def pipe(source, target, read):
+                try:
+                    while data := read(65536):
+                        target.sendall(data)
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    try:
+                        target.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+
+            back = threading.Thread(target=pipe, args=(upstream, self.connection, upstream.recv), daemon=True)
+            back.start()
+            # Bytes the client sent after the handshake may already sit in rfile's buffer, so read through it.
+            pipe(self.connection, upstream, self.rfile.read1)
+            back.join()
+            upstream.close()
+
         def _editor_get(self, path, query):
             room = ctx.get("room")
             if not self._admin():
@@ -919,6 +979,8 @@ def make_handler(ctx):
             query = parse_qs(self.path.partition("?")[2])
             if path == "/ws":
                 return self._websocket()
+            if self.headers.get("Upgrade", "").lower() == "websocket":
+                return self._tunnel()
             if path in ("/auth/login", "/auth/callback"):
                 return self._auth(path, query)
             if path in ("/api/config", "/api/games", "/api/options"):
@@ -937,7 +999,8 @@ def make_handler(ctx):
                         "user": user["name"] if user else None}
                 return self._send(json.dumps({
                     "server": {"running": srv.running, "port": srv.port, "lan": ctx["lan"],
-                               "seed": ctx["graph"]["seed"]},
+                               "address": ctx.get("game_address"), "seed": ctx["graph"]["seed"]},
+                    "versions": ctx.get("versions"),
                     "players": {slot: {"checked": sorted(s["checked"]), "received": s["received"],
                                        "status": s["status"], "games": s["games"],
                                        "status_name": "goal reached" if s["status"] == 30
@@ -1078,12 +1141,15 @@ def main():
     global AP
     ap = argparse.ArgumentParser()
     ap.add_argument("--runtime", required=True)
-    ap.add_argument("--campaign", required=True)
+    ap.add_argument("--campaign", help="Seed to host; without it the room starts empty")
     ap.add_argument("--web-port", type=int, default=8085)
     ap.add_argument("--ap-port", type=int, default=38285)
     args = ap.parse_args()
     AP = os.path.abspath(args.runtime)
-    ctx = {"lan": lan_ip(), "oidc": oidc.load(ROOT)}
+    ctx = {"lan": lan_ip(), "oidc": oidc.load(ROOT), "game_address": os.environ.get("MULTIWORLD_GAME_ADDRESS") or None,
+           "versions": {"archipelago": sources.runtime_version(AP),
+                        "worlds": [{key: world.get(key) for key in ("repo", "tag", "file")}
+                                   for world in sources.installed_worlds(launcher().worlds_dir())]}}
     room = Room(ctx, AP, args.ap_port)
     httpd = None
 
@@ -1092,12 +1158,24 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     try:
-        room.start_campaign(args.campaign)
-        room.update(phase="running", progress=1.0, busy=False, message="Game server running")
+        if args.campaign:
+            try:
+                room.start_campaign(args.campaign)
+                room.update(phase="running", progress=1.0, busy=False, message="Game server running")
+            except (OSError, ValueError, RuntimeError, KeyError, zipfile.BadZipFile) as error:
+                print(f"Could not start {args.campaign}: {error}", file=sys.stderr, flush=True)
+                room.idle()
+                room.update(phase="error", progress=0.0, busy=False, error=str(error),
+                            message="The saved seed could not be started. Edit players & settings to create a new one.")
+        else:
+            room.idle()
+            room.update(phase="stopped", progress=0.0, busy=False,
+                        message="No seed yet. Use Edit players & settings to add players and start the first seed.")
         httpd = WebServer(("0.0.0.0", args.web_port), make_handler(ctx))
         threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True).start()
         print(f"Website: http://{ctx['lan']}:{args.web_port}  (http://localhost:{args.web_port})", flush=True)
-        print(f"Game server: ws://{ctx['lan']}:{args.ap_port}", flush=True)
+        print(f"Game server: ws://{ctx['lan']}:{args.ap_port}" + (
+            f" (players connect to {ctx['game_address']})" if ctx["game_address"] else ""), flush=True)
         print(f"Edit players and start new seeds at http://localhost:{args.web_port}/ (Edit button)", flush=True)
         if ctx["oidc"]:
             print(f"Remote admins can log in through {ctx['oidc'].issuer}", flush=True)

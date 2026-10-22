@@ -16,3 +16,9 @@ venv/
 *.apworld
 # OpenID Connect login (contains the client secret)
 /oidc.json
+
+# Frozen copy of the pre-rename code for a room still running from it
+/dependencies/
+!/app/smoke-test.yaml
+/inactive-players/
+/room-settings.json
