@@ -680,6 +680,9 @@ $("edit-open").onclick = async () => {
   $("main").classList.add("editing");
   $("editor").hidden = false;
   $("ed-error").textContent = "";
+  // Until players and games are loaded, adding a player would silently do nothing.
+  $("ed-add").disabled = true;
+  $("ed-add").title = "Loading the installed games…";
   $("ed-cards").innerHTML = '<p class="dim">Loading players and game settings… (the first time this reads every installed game and can take a few seconds)</p>';
   try {
     const [config, games] = await Promise.all([getJSON("/api/config"), getJSON("/api/games")]);
@@ -689,6 +692,8 @@ $("edit-open").onclick = async () => {
     $("left-interval").value = config.left_player_interval;
     $("left-interval").classList.remove("bad");
     $("left-interval-status").textContent = "";
+    $("ed-add").disabled = false;
+    $("ed-add").title = "";
     await Promise.all(editor.players.map(p => p.editable && schemaFor(p.game)));
     renderEditor();
   } catch (error) {
@@ -730,11 +735,13 @@ $("left-interval").onchange = async () => {
 $("ed-add").onclick = async () => {
   if (!editor) return;
   const game = editor.players.find(p => p.editable && !p.remove)?.game || editor.games[0];
-  editor.players.push({file: null, editable: true, name: "", game, origGame: null, options: {}, set: {}, unset: new Set(),
-    remove: false, isNew: true, open: true});
-  await schemaFor(game);
+  const player = {file: null, editable: true, name: "", game, origGame: null, options: {}, set: {}, unset: new Set(),
+    remove: false, isNew: true, open: true};
+  editor.players.push(player);
   renderEditor();
   $("ed-cards").lastElementChild?.querySelector("input[data-name]")?.focus();
+  await schemaFor(game);
+  if (editor?.players.includes(player)) renderSettings(editor.players.indexOf(player));
 };
 
 const isOverridden = (p, name) => name in p.set || (p.game === p.origGame && name in p.options && !p.unset.has(name));
@@ -819,6 +826,12 @@ function cardHTML(p, index) {
 
 function renderEditor() {
   $("ed-cards").innerHTML = editor.players.map(cardHTML).join("") || '<p class="dim">No players. Add one.</p>';
+}
+// Fills in a card's settings without re-rendering its name field, which may have focus.
+function renderSettings(index) {
+  const p = editor.players[index], details = document.querySelector(`[data-open="${index}"]`);
+  if (!details || !p.editable || p.remove) return renderCard(index);
+  details.innerHTML = `<summary>Settings for ${esc(p.game)}</summary>${settingsHTML(p, index)}`;
 }
 function renderCard(index) {
   const card = $(`ed-card-${index}`);

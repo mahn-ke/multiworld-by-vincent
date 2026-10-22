@@ -304,3 +304,24 @@ test("host cards offer a player-has-left checkbox with a countdown bar; visitors
   assert.equal(ui.run("duration(3600)"), "1 h");
   assert.equal(ui.run("duration(1)"), "1 s");
 });
+
+test("Add player is disabled while the editor loads and adds a card at once on the first click", async () => {
+  const ui = setup();
+  let finishGames, finishOptions;
+  const games = new Promise(resolve => finishGames = resolve), options = new Promise(resolve => finishOptions = resolve);
+  ui.element("ed-cards").lastElementChild = {querySelector: () => ({focus() {}})};
+  ui.run(`fetch = async url => ({ok: true, json: async () =>
+    url === "/api/config" ? {players: [], prefer_other_players: true, left_player_interval: 60}
+    : url === "/api/games" ? globalThis.games : globalThis.options})`);
+  ui.run("globalThis").games = games;
+  ui.run("globalThis").options = options;
+  const opening = ui.run(`document.querySelector = () => null; $("edit-open").onclick()`);
+  assert.equal(ui.element("ed-add").disabled, true);
+  finishGames(["Peglin"]);
+  await opening;
+  assert.equal(ui.element("ed-add").disabled, false);
+  const adding = ui.run(`$("ed-add").onclick()`);
+  assert.match(ui.element("ed-cards").innerHTML, /data-name="0"[\s\S]*Loading settings/);
+  finishOptions({options: []});
+  await adding;
+});
