@@ -28,7 +28,7 @@
   header h1 { margin:0; font-size:20px; }
   #connection-status { margin-left:auto; transition:opacity .6s ease; }
   #connection-status.fading { opacity:0; }
-  .header-actions:has(> #edit-open[hidden]):has(> #downloads[hidden]) { display:none; }
+  .header-actions:has(> #edit-open[hidden]):has(> #downloads[hidden]):has(> #login[hidden]):has(> #signed-in[hidden]) { display:none; }
   .header-actions { margin-left:auto; display:flex; gap:24px; align-items:baseline; }
   #server-error { color:#ff927e; }
   @media (prefers-reduced-motion:reduce) {
@@ -88,7 +88,10 @@
   .two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
   .two:has(> #admin[hidden]) { grid-template-columns:minmax(0,1fr); }
   @media (max-width:900px) { .two { grid-template-columns:1fr; } }
-  button.act { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 14px; cursor:pointer; }
+  a.act { display:inline-block; text-decoration:none; font-size:13.333px; }
+  #signed-in { margin:0; }
+  #login[hidden] { display:none; }
+  button.act, a.act { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 14px; cursor:pointer; }
   button.act.primary { border-color:var(--goal); color:var(--goal); }
   button.act:disabled { opacity:.5; cursor:default; }
   button.link { background:none; border:0; color:var(--useful); cursor:pointer; padding:0 4px; font-size:12px; }
@@ -131,6 +134,9 @@
   <div class="header-actions">
     <div id="downloads" class="dim" hidden></div>
     <button id="edit-open" class="act" hidden>Edit players &amp; settings</button>
+    <a id="login" class="act" href="/auth/login" hidden>Log in</a>
+    <form id="signed-in" class="dim" method="post" action="/auth/logout" hidden>
+      <span id="user-name"></span> <button class="act">Log out</button></form>
   </div>
 </header>
 <main id="main">
@@ -178,7 +184,7 @@
   </section>
   <div class="two">
     <section><h2>Activity</h2><div id="feed"></div></section>
-    <section id="admin" hidden><h2>Server console (host only)</h2><div id="log"></div>
+    <section id="admin" hidden><h2>Server console (host &amp; admins only)</h2><div id="log"></div>
       <input id="cmd" placeholder="/send Peglin Orbelisk · /send_location Peglin ... · /hint ... · /status · /forfeit ... (Enter to run)"></section>
   </div>
 </main>
@@ -331,6 +337,9 @@ function drawHeader(online = status.server?.running ?? false) {
   $("srv").textContent = online ? "Stop server" : "Start server";
   $("srv").disabled = pendingServer !== null || !!status.room?.busy || !status.server;
   $("edit-open").hidden = !local;
+  $("login").hidden = !status.auth?.login;
+  $("signed-in").hidden = !status.auth?.user;
+  $("user-name").textContent = status.auth?.user ? `Signed in as ${status.auth.user}` : "";
   const spoiler = local && status.downloads?.find(d => d.endsWith("_Spoiler.txt"));
   $("downloads").hidden = !spoiler;
   $("downloads").innerHTML = spoiler ? `Downloads: <a href="/download/${encodeURIComponent(spoiler)}">Spoiler Log</a>` : "";

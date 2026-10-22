@@ -5,6 +5,7 @@ import base64
 import collections
 import copy
 import hashlib
+import html
 import importlib.util
 import json
 import os
@@ -20,10 +21,13 @@ import threading
 import time
 import uuid
 import zipfile
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote
 
 import websockets
+
+import oidc
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = Path(DIR).parent
@@ -777,9 +781,66 @@ def make_handler(ctx):
         def _local(self):
             return self.client_address[0] in ("127.0.0.1", "::1")
 
+        def _cookie(self, name):
+            jar = SimpleCookie()
+            try:
+                jar.load(self.headers.get("Cookie", ""))
+            except CookieError:
+                return None
+            return jar[name].value if name in jar else None
+
+        def _scheme(self):
+            proto = self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+            return proto if proto in ("http", "https") else "http"
+
+        def _base_url(self):
+            return ctx["oidc"].base_url(self.headers.get("Host", "localhost"), self._scheme())
+
+        def _user(self):
+            """The identity-provider user signed in on this browser, if login is configured."""
+            if not ctx.get("oidc"):
+                return None
+            return ctx["oidc"].user(self._cookie(oidc.SESSION_COOKIE))
+
+        def _admin(self):
+            if self._local():
+                return True
+            user = self._user()
+            return bool(user and user["admin"])
+
+        def _set_cookie(self, name, value, max_age):
+            secure = "; Secure" if self._scheme() == "https" else ""
+            return f"{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
+
         def _same_origin(self):
             origin = self.headers.get("Origin")
-            return origin is None or origin == f"http://{self.headers.get('Host')}"
+            host = self.headers.get("Host")
+            return origin is None or origin in (f"http://{host}", f"https://{host}")
+
+        def _auth(self, path, query):
+            auth = ctx.get("oidc")
+            if auth is None:
+                return self._send("login is not configured", "text/plain", 404)
+            try:
+                if path == "/auth/login":
+                    url, state = auth.begin(self._base_url())
+                    return self._send("", "text/plain", 303, {
+                        "Location": url, "Set-Cookie": self._set_cookie(oidc.LOGIN_COOKIE, state, oidc.LOGIN_TIMEOUT)})
+                if "error" in query:
+                    raise oidc.AuthError(query.get("error_description", query["error"])[0])
+                session = auth.finish(query.get("state", [""])[0], self._cookie(oidc.LOGIN_COOKIE),
+                                      query.get("code", [""])[0])
+            except oidc.AuthError as error:
+                page = f"<!doctype html><title>Login failed</title><p>Login failed: {html.escape(str(error))}</p>" \
+                       '<p><a href="/">Back to the room</a></p>'
+                return self._send(page, "text/html; charset=utf-8", 400)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Set-Cookie", self._set_cookie(oidc.SESSION_COOKIE, session, oidc.SESSION_LIMIT))
+            self.send_header("Set-Cookie", self._set_cookie(oidc.LOGIN_COOKIE, "", 0))
+            self.end_headers()
 
         def _json(self, body, status=200):
             return self._send(json.dumps(body), status=status)
@@ -799,7 +860,7 @@ def make_handler(ctx):
             self.end_headers()
             self.wfile.flush()
             self.close_connection = True
-            client = SocketClient(self.connection, admin=self._local() and self._same_origin())
+            client = SocketClient(self.connection, admin=self._admin() and self._same_origin())
             try:
                 room.attach(client)
                 while (frame := ws_read(self.rfile)) is not None:
@@ -816,8 +877,8 @@ def make_handler(ctx):
 
         def _editor_get(self, path, query):
             room = ctx.get("room")
-            if not self._local():
-                return self._json({"error": "Editing is only available on the host machine"}, 403)
+            if not self._admin():
+                return self._json({"error": "Editing is only available on the host machine or to admins"}, 403)
             if room is None:
                 return self._json({"error": "Editing is unavailable"}, 503)
             if path == "/api/config":
@@ -858,6 +919,8 @@ def make_handler(ctx):
             query = parse_qs(self.path.partition("?")[2])
             if path == "/ws":
                 return self._websocket()
+            if path in ("/auth/login", "/auth/callback"):
+                return self._auth(path, query)
             if path in ("/api/config", "/api/games", "/api/options"):
                 return self._editor_get(path, query)
             if path == "/":
@@ -868,6 +931,10 @@ def make_handler(ctx):
                 return self._send(json.dumps(ctx["checks"]))
             if path == "/api/status":
                 tr, srv, room = ctx["tracker"], ctx["server"], ctx.get("room")
+                user, local = self._user(), self._local()
+                admin = local or bool(user and user["admin"])
+                auth = {"login": bool(ctx.get("oidc")) and not local and user is None,
+                        "user": user["name"] if user else None}
                 return self._send(json.dumps({
                     "server": {"running": srv.running, "port": srv.port, "lan": ctx["lan"],
                                "seed": ctx["graph"]["seed"]},
@@ -879,11 +946,12 @@ def make_handler(ctx):
                                        "tracking": s["online"]}
                                 for slot, s in tr.state.items()},
                     "feed": list(tr.feed)[-80:],
-                    "admin": self._local(),
-                    "log": list(srv.log)[-200:] if self._local() else [],
+                    "admin": admin,
+                    "auth": auth,
+                    "log": list(srv.log)[-200:] if admin else [],
                     "downloads": ctx["downloads"],
                     "room": room.snapshot() if room else None,
-                    "left": room.left_status() if room and self._local() else {},
+                    "left": room.left_status() if room and admin else {},
                     "left_interval": room.left_interval if room else None,
                 }))
             if path.startswith("/download/"):
@@ -900,11 +968,21 @@ def make_handler(ctx):
             self._send("not found", "text/plain", 404)
 
         def do_POST(self):
+            if self.path == "/auth/logout" and ctx.get("oidc"):
+                if not self._same_origin():
+                    return self._send("Expected a same-origin request", "text/plain", 403)
+                target = ctx["oidc"].logout(self._cookie(oidc.SESSION_COOKIE), self._base_url()) or "/"
+                return self._send("", "text/plain", 303, {
+                    "Location": target, "Set-Cookie": self._set_cookie(oidc.SESSION_COOKIE, "", 0)})
             if self.path not in ("/api/command", "/api/check", "/api/config", "/api/server", "/api/left",
                                  "/api/room-settings"):
                 return self._send("not found", "text/plain", 404)
-            if not self._local():
-                return self._send(json.dumps({"error": "admin commands are only accepted from the host machine"}), status=403)
+            if not self._admin():
+                return self._send(json.dumps({"error": "admin commands are only accepted from the host machine "
+                                                       "or a signed-in admin"}), status=403)
+            if not self._local() and (not self._same_origin() or self.headers.get("Content-Type", "")
+                                      .split(";")[0].strip() != "application/json"):
+                return self._json({"error": "Expected a same-origin JSON request"}, 403)
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                 if not isinstance(body, dict):
@@ -1005,7 +1083,7 @@ def main():
     ap.add_argument("--ap-port", type=int, default=38285)
     args = ap.parse_args()
     AP = os.path.abspath(args.runtime)
-    ctx = {"lan": lan_ip()}
+    ctx = {"lan": lan_ip(), "oidc": oidc.load(ROOT)}
     room = Room(ctx, AP, args.ap_port)
     httpd = None
 
@@ -1021,6 +1099,8 @@ def main():
         print(f"Website: http://{ctx['lan']}:{args.web_port}  (http://localhost:{args.web_port})", flush=True)
         print(f"Game server: ws://{ctx['lan']}:{args.ap_port}", flush=True)
         print(f"Edit players and start new seeds at http://localhost:{args.web_port}/ (Edit button)", flush=True)
+        if ctx["oidc"]:
+            print(f"Remote admins can log in through {ctx['oidc'].issuer}", flush=True)
         while True:
             time.sleep(0.5)
             room.watch()

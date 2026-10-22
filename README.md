@@ -118,6 +118,34 @@ have left**, 1–3600 seconds). It is saved to `room-settings.json`
 The website, spoiler and tracker are visible to anyone who can reach its port.
 Only host on a trusted network.
 
+### Remote admins via OpenID Connect (optional)
+
+Everything marked "localhost only" above stays available on localhost without
+logging in. To also give remote admins these controls, put an `oidc.json`
+beside `start.sh` (it holds a secret and is git-ignored):
+
+```json
+{
+  "issuer": "https://sso.example.com/realms/my-realm",
+  "client_id": "multiworldgg",
+  "client_secret": "..."
+}
+```
+
+Remote visitors then see a **Log in** button. After logging in, users whom
+Keycloak considers admins (the `realm-management` client role `realm-admin`, or a
+realm role named `admin`) get the full host page. Everyone else sees the normal
+visitor page, without the login button. Override the roles with
+`"admin_roles": ["..."]` (realm roles) and
+`"admin_client_roles": {"client-id": ["..."]}`. Set `"public_url"` when the room is
+behind a reverse proxy (e.g. `"https://room.example.com"`); otherwise the
+browser's host is used.
+
+In Keycloak, create a confidential OpenID Connect client (standard flow, PKCE
+S256) with the redirect URI `<room URL>/auth/callback` and the post-logout
+redirect URI `<room URL>/`. Sessions are kept in memory, so a room restart signs
+everyone out; roles are re-checked whenever the access token is refreshed.
+
 ## Moving or sharing
 
 Copy **`start.sh` + `dependencies/` + your YAMLs** together to any folder,
