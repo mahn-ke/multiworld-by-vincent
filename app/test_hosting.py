@@ -71,7 +71,8 @@ class SourcesTests(unittest.TestCase):
         self.assertEqual(manifest, [{"repo": "org/peglin", "tag": "v1.2.0", "file": "peglin.apworld",
                                      "sha256": hashlib.sha256(b"peglin world").hexdigest()}])
         self.assertEqual(sources.installed_worlds(target), manifest)
-
+        # Readable by other users: the Docker image fetches as root and runs the room unprivileged.
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
     def test_checksum_mismatch_and_duplicates_keep_the_previous_download(self):
         target = self.root / "worlds"
         sources.fetch_worlds("org", target)

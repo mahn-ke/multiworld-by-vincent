@@ -150,6 +150,8 @@ def fetch_worlds(org: str, target: Path) -> list[dict]:
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".worlds-", dir=target.parent))
     try:
+        # mkdtemp is private (0700); the Docker image builds as root but runs the room as another user.
+        staging.chmod(0o755)
         sums_cache, manifest = {}, []
         for world in worlds:
             path = staging / world["file"]
