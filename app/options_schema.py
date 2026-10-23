@@ -14,7 +14,7 @@ sys.path.insert(0, os.getcwd())
 logging.disable(logging.CRITICAL)
 
 import Options  # noqa: E402
-from worlds import AutoWorldRegister  # noqa: E402
+from worlds import AutoWorldRegister, ensure_worlds_loaded  # noqa: E402
 
 SUGGESTION_LIMIT = 5000
 
@@ -67,6 +67,7 @@ def describe(name, option, group, world):
 
 
 def main():
+    ensure_worlds_loaded()
     games = {}
     for game, world in sorted(AutoWorldRegister.world_types.items()):
         if world.hidden:

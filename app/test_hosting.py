@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
 import websockets
@@ -99,6 +99,37 @@ class SourcesTests(unittest.TestCase):
         self.assertEqual(sources.runtime_version(runtime), "0.7.0")
         with self.assertRaisesRegex(ValueError, "Unexpected release tag"):
             sources.safe_tag("../../etc")
+
+    def test_runtime_release_and_archive_use_multiworldgg(self):
+        with patch.object(sources, "get_json", return_value={"tag_name": "0.7.274"}) as lookup:
+            self.assertEqual(sources.latest_runtime_tag(), "0.7.274")
+        lookup.assert_called_once_with("https://api.github.com/repos/MultiworldGG/MultiworldGG/releases/latest")
+        with patch.object(sources, "download") as download, \
+                patch.object(sources, "extract_runtime") as extract:
+            sources.download_runtime("0.7.274", self.root / "runtime")
+        self.assertEqual(download.call_args.args[0],
+                         "https://github.com/MultiworldGG/MultiworldGG/archive/refs/tags/0.7.274.tar.gz")
+        self.assertEqual(extract.call_args.args[1:], (self.root / "runtime", "0.7.274"))
+
+    def test_options_cache_is_invalidated_when_runtime_changes(self):
+        engine = self.root / "runtime"
+        engine.mkdir()
+        marker = engine / "ARCHIPELAGO_VERSION"
+        marker.write_text("0.7.273")
+        room = site.Room({}, str(engine), 38999, root=self.root)
+
+        def read_schema(command, **kwargs):
+            Path(command[-1]).write_text(json.dumps({"games": {"Balatro": {"options": []}}}))
+            return Mock(returncode=0)
+
+        with patch.object(site.subprocess, "run", side_effect=read_schema) as read:
+            self.assertIn("Balatro", room.options_schema())
+            self.assertIn("Balatro", room.options_schema())
+            self.assertEqual(read.call_count, 1)
+            marker.write_text("0.7.274")
+            self.assertIn("Balatro", room.options_schema())
+            self.assertEqual(read.call_count, 2)
+        self.assertEqual(len(list((self.root / ".cache").glob("options-*.json"))), 2)
 
 
 class HostingTests(unittest.TestCase):

@@ -7,11 +7,11 @@ if [[ ! -f "$ROOT/app/launch.py" ]]; then
     exit 1
 fi
 
-for candidate in "${PYTHON:-python3.11}" python3.12 python3.13 python3; do
+for candidate in "${PYTHON:-python3.12}" python3.13 python3; do
     if command -v "$candidate" >/dev/null && "$candidate" -c \
-        'import sys; sys.exit(not ((3, 11, 13) <= sys.version_info < (3, 14)))'; then
+        'import sys; sys.exit(not ((3, 12) <= sys.version_info < (3, 14)))'; then
         exec "$candidate" "$ROOT/app/launch.py" "$@"
     fi
 done
-echo "Python 3.11.13+, 3.12 or 3.13 is required (not 3.14). Install it or set PYTHON=/path/to/python." >&2
+echo "Python 3.12 or 3.13 is required (not 3.14). Install it or set PYTHON=/path/to/python." >&2
 exit 1

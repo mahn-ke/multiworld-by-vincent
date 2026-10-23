@@ -43,7 +43,8 @@ class LauncherTests(unittest.TestCase):
         self.worlds = self.root / "released-worlds"
         self.worlds.mkdir()
         self.environment = {}
-        environment = {key: value for key, value in os.environ.items() if not key.startswith(("MULTIWORLD_", "ARCHIPELAGO_"))}
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("MULTIWORLD_", "MULTIWORLDGG_", "ARCHIPELAGO_"))}
         environment["MULTIWORLD_WORLDS"] = str(self.worlds)
         self.patches = [
             patch.object(launch, "ROOT", self.root),
@@ -103,19 +104,25 @@ class LauncherTests(unittest.TestCase):
             (target / "ARCHIPELAGO_VERSION").write_text(tag)
             return target
 
-        with patch.object(launch.sources, "latest_archipelago_tag", return_value="0.7.0"), \
+        old = cache / "runtime-0.6.8"
+        old.mkdir()
+        (old / "ARCHIPELAGO_VERSION").write_text("0.6.8")
+        with patch.object(launch.sources, "latest_runtime_tag", return_value="0.7.0"), \
                 patch.object(launch.sources, "download_runtime", side_effect=download) as fetched:
-            self.assertEqual(launch.runtime(cache), cache / "runtime-0.7.0")
-            self.assertEqual(launch.runtime(cache), cache / "runtime-0.7.0")
+            self.assertEqual(launch.runtime(cache), cache / "runtime-multiworldgg-0.7.0")
+            self.assertEqual(launch.runtime(cache), cache / "runtime-multiworldgg-0.7.0")
         fetched.assert_called_once()
         with patch.dict(os.environ, {"ARCHIPELAGO_VERSION": "0.6.9"}), \
                 patch.object(launch.sources, "download_runtime", side_effect=download):
-            self.assertEqual(launch.runtime(cache), cache / "runtime-0.6.9")
-        with patch.object(launch.sources, "latest_archipelago_tag", side_effect=OSError("offline")):
-            self.assertIn(launch.runtime(cache).name, ("runtime-0.7.0", "runtime-0.6.9"))
-            for path in cache.glob("runtime-*"):
+            self.assertEqual(launch.runtime(cache), cache / "runtime-multiworldgg-0.6.9")
+        with patch.dict(os.environ, {"MULTIWORLDGG_VERSION": "0.7.274", "ARCHIPELAGO_VERSION": "0.6.8"}), \
+                patch.object(launch.sources, "download_runtime", side_effect=download):
+            self.assertEqual(launch.runtime(cache), cache / "runtime-multiworldgg-0.7.274")
+        with patch.object(launch.sources, "latest_runtime_tag", side_effect=OSError("offline")):
+            self.assertTrue(launch.runtime(cache).name.startswith("runtime-multiworldgg-"))
+            for path in cache.glob("runtime-multiworldgg-*"):
                 (path / "ARCHIPELAGO_VERSION").unlink()
-            with self.assertRaisesRegex(RuntimeError, "latest Archipelago release"):
+            with self.assertRaisesRegex(RuntimeError, "latest MultiworldGG release"):
                 launch.runtime(cache)
 
     def test_latest_campaign_requires_existing_seed_files(self):

@@ -532,9 +532,12 @@ class Room:
     # -- options schema for the editor
     def options_schema(self):
         custom = Path(self.engine) / "custom_worlds"
-        signature = hashlib.sha256(json.dumps(sorted(
+        worlds = sorted(
             (path.name, path.stat().st_size, path.stat().st_mtime) for path in custom.glob("*.apworld")
-        ) if custom.is_dir() else []).encode()).hexdigest()[:16]
+        ) if custom.is_dir() else []
+        signature = hashlib.sha256(json.dumps(
+            [sources.RUNTIME_REPO, sources.runtime_version(Path(self.engine)), worlds]
+        ).encode()).hexdigest()[:16]
         with self.schema_lock:
             if self.schema[0] == signature:
                 return self.schema[1]

@@ -5,7 +5,7 @@ or run locally with `./start.sh`.
 
 ## Start a new multiworld
 
-1. Install **Python 3.11.13+, 3.12, or 3.13** (not 3.14). macOS/Linux, Bash,
+1. Install **Python 3.12 or 3.13** (not 3.11 or 3.14). macOS/Linux, Bash,
    Python's `venv` and `pip` are required.
 2. Put all player `.yaml` / `.yml` files directly beside `start.sh`.
    Or start without any and add players with **Edit** (`./start.sh --allow-empty`).
@@ -157,11 +157,17 @@ including paths with spaces. You can instead copy this whole directory.
 There are no links to the original workspace, no bundled credentials, and no
 dependencies on its old runtime or virtual environment.
 
-The first launch needs internet: it downloads the latest Archipelago release
-(`https://github.com/ArchipelagoMW/Archipelago/archive/refs/tags/<tag>.tar.gz`;
-pin one with `ARCHIPELAGO_VERSION=0.6.8`), the [custom games](#more-games) and
+The first launch needs internet: it downloads the latest
+[MultiworldGG release](https://github.com/MultiworldGG/MultiworldGG/releases)
+(`https://github.com/MultiworldGG/MultiworldGG/archive/refs/tags/<tag>.tar.gz`;
+pin one with `MULTIWORLDGG_VERSION=0.7.274`), the [custom games](#more-games) and
 the Python packages. Later launches reuse the cache and work offline. Game mods
 are not installed by this launcher; install the matching game clients separately.
+The runtime includes MultiworldGG games such as Balatro. The editor lists games
+that successfully load in the installed runtime, not a copy of the public website's
+catalog. `ARCHIPELAGO_VERSION` remains a legacy alias for `MULTIWORLDGG_VERSION`;
+its value must now name a MultiworldGG release. The new runtime uses a separate
+cache and never falls back to a previously cached Archipelago runtime.
 
 `.cache/` contains generated local runtime and Python environments. It need not
 be copied. Moving the directory or switching Python rebuilds the environment
@@ -203,9 +209,11 @@ reported with the full log path; a failed generation never hosts an older seed.
 `app/Dockerfile` builds the image the [mahn-ke](https://github.com/mahn-ke)
 deploy workflow publishes as `ghcr.io/mahn-ke/multiworld-by-vincent` and runs
 with `docker-compose.yml` behind `https://multiworld.by.vincent.mahn.ke`. Every
-build downloads the latest Archipelago release (build argument
-`ARCHIPELAGO_VERSION`) and the organization's games (`WORLDS_ORG`). The `test`
-stage runs the unit tests and generates a smoke-test seed with them.
+build downloads the latest MultiworldGG release (build argument
+`MULTIWORLDGG_VERSION`) and the organization's games (`WORLDS_ORG`). The `test`
+stage runs the unit tests, generates a seed combining Balatro, ChecksFinder,
+Pathogenic, Peglin and Super Mario Galaxy, and checks their editor options load.
+Persistent player YAMLs, seeds and saves are not rewritten by this migration.
 
 - The room keeps its YAMLs, seeds and settings in the `/data` volume. A new,
   empty volume starts an idle room; an admin adds players with **Edit**. After
@@ -239,7 +247,7 @@ shown to players), `OIDC_PUBLIC_URL` (public URL behind a reverse proxy).
 
 ```sh
 cd app
-python3.11 -m unittest test_launch test_room test_oidc test_cross_player test_hosting
+python3.12 -m unittest test_launch test_room test_oidc test_cross_player test_hosting
 node --test test_site.js
 docker build --target test .
 ```

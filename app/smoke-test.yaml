@@ -1,4 +1,20 @@
-# Used by the Docker test stage to check that the downloaded Archipelago can generate a seed.
+# Used by the Docker test stage to check built-in and custom-world compatibility.
 name: Smoke
 game: ChecksFinder
 ChecksFinder: {}
+---
+name: BalatroSmoke
+game: Balatro
+Balatro: {}
+---
+name: PathogenicSmoke
+game: Pathogenic
+Pathogenic: {}
+---
+name: PeglinSmoke
+game: Peglin
+Peglin: {}
+---
+name: GalaxySmoke
+game: Super Mario Galaxy
+Super Mario Galaxy: {}

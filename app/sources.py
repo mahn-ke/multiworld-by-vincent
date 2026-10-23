@@ -1,6 +1,6 @@
-"""Downloads the Archipelago runtime and the custom games (.apworld) released in a GitHub organization.
+"""Downloads the MultiworldGG runtime and the custom games (.apworld) released in a GitHub organization.
 
-    python sources.py runtime DEST [--version TAG]   # latest Archipelago release unless TAG is given
+    python sources.py runtime DEST [--version TAG]   # latest MultiworldGG release unless TAG is given
     python sources.py worlds DEST [--org ORG]        # latest release *.apworld of every public repo in ORG
 
 Set GITHUB_TOKEN to raise the GitHub API rate limit.
@@ -19,7 +19,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 API = "https://api.github.com"
-ARCHIPELAGO = "ArchipelagoMW/Archipelago"
+RUNTIME_REPO = "MultiworldGG/MultiworldGG"
 WORLDS_ORG = "mahnkepelago"
 WORLDS_MANIFEST = "worlds.json"
 RUNTIME_REQUIRED = ("Generate.py", "MultiServer.py", "worlds", "LICENSE")
@@ -50,10 +50,10 @@ def safe_tag(tag: str) -> str:
     return tag
 
 
-# ---------------------------------------------------------------- Archipelago
+# ---------------------------------------------------------------- Runtime
 
-def latest_archipelago_tag() -> str:
-    return safe_tag(get_json(f"{API}/repos/{ARCHIPELAGO}/releases/latest")["tag_name"])
+def latest_runtime_tag() -> str:
+    return safe_tag(get_json(f"{API}/repos/{RUNTIME_REPO}/releases/latest")["tag_name"])
 
 
 def extract_runtime(archive: Path, target: Path, version: str) -> Path:
@@ -68,7 +68,7 @@ def extract_runtime(archive: Path, target: Path, version: str) -> Path:
         root = entries[0] if len(entries) == 1 and entries[0].is_dir() else staging
         for name in RUNTIME_REQUIRED:
             if not (root / name).exists():
-                raise ValueError(f"Archipelago {version} is missing {name}")
+                raise ValueError(f"MultiworldGG {version} is missing {name}")
         (root / "custom_worlds").mkdir(exist_ok=True)
         (root / "ARCHIPELAGO_VERSION").write_text(version + "\n")
         if target.exists():
@@ -82,8 +82,8 @@ def download_runtime(tag: str, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="download-", dir=target.parent) as temporary:
         archive = Path(temporary) / "archipelago.tar.gz"
-        print(f"Downloading Archipelago {tag}", flush=True)
-        download(f"https://github.com/{ARCHIPELAGO}/archive/refs/tags/{tag}.tar.gz", archive)
+        print(f"Downloading MultiworldGG {tag}", flush=True)
+        download(f"https://github.com/{RUNTIME_REPO}/archive/refs/tags/{tag}.tar.gz", archive)
         return extract_runtime(archive, target, tag)
 
 
@@ -197,9 +197,9 @@ def main() -> None:
     worlds.add_argument("--org", default=WORLDS_ORG)
     args = parser.parse_args()
     if args.command == "runtime":
-        tag = latest_archipelago_tag() if args.version in ("", "latest") else safe_tag(args.version)
+        tag = latest_runtime_tag() if args.version in ("", "latest") else safe_tag(args.version)
         download_runtime(tag, args.dest)
-        print(f"Archipelago {tag} in {args.dest}")
+        print(f"MultiworldGG {tag} in {args.dest}")
     else:
         print(f"Custom games released in {args.org}:", flush=True)
         found = fetch_worlds(args.org, args.dest)

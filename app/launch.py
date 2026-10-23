@@ -55,23 +55,24 @@ def check_ports(web_port: int, ap_port: int) -> None:
 
 
 def runtime(cache: Path) -> Path:
-    """Archipelago source: MULTIWORLD_RUNTIME (prepared in the Docker image) or a download of the
-    latest release (ARCHIPELAGO_VERSION pins a tag), cached per tag. Offline, the newest cached one is used."""
+    """MultiworldGG source: MULTIWORLD_RUNTIME or a release cached per tag.
+    MULTIWORLDGG_VERSION pins a tag; ARCHIPELAGO_VERSION remains a legacy alias."""
     if os.environ.get("MULTIWORLD_RUNTIME"):
         target = Path(os.environ["MULTIWORLD_RUNTIME"])
     else:
-        requested = os.environ.get("ARCHIPELAGO_VERSION", "latest")
+        requested = os.environ.get("MULTIWORLDGG_VERSION", os.environ.get("ARCHIPELAGO_VERSION", "latest"))
         try:
-            tag = sources.latest_archipelago_tag() if requested in ("", "latest") else sources.safe_tag(requested)
+            tag = sources.latest_runtime_tag() if requested in ("", "latest") else sources.safe_tag(requested)
         except (OSError, URLError, ValueError, KeyError) as error:
-            cached = sorted(cache.glob("runtime-*/ARCHIPELAGO_VERSION"), key=lambda path: path.stat().st_mtime)
+            cached = sorted(cache.glob("runtime-multiworldgg-*/ARCHIPELAGO_VERSION"),
+                            key=lambda path: path.stat().st_mtime)
             if not cached:
-                raise RuntimeError(f"Could not look up the latest Archipelago release: {error}") from error
+                raise RuntimeError(f"Could not look up the latest MultiworldGG release: {error}") from error
             target = cached[-1].parent
-            print(f"Could not look up the latest Archipelago release ({error}); using cached "
+            print(f"Could not look up the latest MultiworldGG release ({error}); using cached "
                   f"{sources.runtime_version(target)}", file=sys.stderr, flush=True)
         else:
-            target = cache / f"runtime-{tag}"
+            target = cache / f"runtime-multiworldgg-{tag}"
             if not (target / "ARCHIPELAGO_VERSION").is_file():
                 sources.download_runtime(tag, target)
     if not (target / "Generate.py").is_file() or not (target / "MultiServer.py").is_file():
@@ -304,7 +305,7 @@ def main() -> None:
         if not args.generate_only:
             check_ports(args.web_port, args.ap_port)
         engine = runtime(cache)
-        print(f"Archipelago {sources.runtime_version(engine) or 'unknown version'}", flush=True)
+        print(f"MultiworldGG {sources.runtime_version(engine) or 'unknown version'}", flush=True)
         python = python_environment(cache)
         update_worlds()
         sync_worlds(engine)
