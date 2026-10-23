@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError
 
 import websockets
@@ -130,6 +130,40 @@ class SourcesTests(unittest.TestCase):
             self.assertIn("Balatro", room.options_schema())
             self.assertEqual(read.call_count, 2)
         self.assertEqual(len(list((self.root / ".cache").glob("options-*.json"))), 2)
+
+
+class ServerStartupTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.campaign = self.root / "AP_test.zip"
+        with site.zipfile.ZipFile(self.campaign, "w"):
+            pass
+        self.campaign.with_suffix(".graph.json").write_text(json.dumps({"seed": "test", "players": []}))
+        self.room = site.Room({}, str(self.root), 38999, root=self.root)
+        self.server = Mock(running=True, log=[])
+
+    def test_cold_world_scan_can_take_more_than_thirty_seconds(self):
+        with patch.object(site, "load_checks", return_value={}), \
+                patch.object(site, "Server", return_value=self.server), \
+                patch.object(site, "Tracker"), \
+                patch.object(site.time, "monotonic", side_effect=[0, 60, 120]), \
+                patch.object(site.time, "sleep"), \
+                patch.object(site.socket, "create_connection",
+                             side_effect=[OSError("loading"), OSError("loading"), MagicMock()]):
+            self.room.start_campaign(self.campaign)
+        self.assertIs(self.room.ctx["server"], self.server)
+        self.server.stop.assert_not_called()
+
+    def test_unresponsive_game_server_still_times_out_and_stops(self):
+        with patch.object(site, "load_checks", return_value={}), \
+                patch.object(site, "Server", return_value=self.server), \
+                patch.object(site.time, "monotonic", side_effect=[0, 301]), \
+                patch.object(site.socket, "create_connection", side_effect=OSError("loading")):
+            with self.assertRaisesRegex(RuntimeError, "within 300 seconds"):
+                self.room.start_campaign(self.campaign)
+        self.server.stop.assert_called_once()
 
 
 class HostingTests(unittest.TestCase):

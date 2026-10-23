@@ -214,6 +214,8 @@ build downloads the latest MultiworldGG release (build argument
 stage runs the unit tests, generates a seed combining Balatro, ChecksFinder,
 Pathogenic, Peglin and Super Mario Galaxy, and checks their editor options load.
 Persistent player YAMLs, seeds and saves are not rewritten by this migration.
+The first game-server start can take several minutes while MultiworldGG scans
+its worlds; the room allows up to five minutes before reporting a startup failure.
 
 - The room keeps its YAMLs, seeds and settings in the `/data` volume. A new,
   empty volume starts an idle room; an admin adds players with **Edit**. After

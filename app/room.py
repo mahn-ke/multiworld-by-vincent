@@ -572,7 +572,7 @@ class Room:
         checks = load_checks(zip_path)
         server = Server(zip_path, self.port)
         server.start()
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 300
         try:
             while True:
                 if not server.running:
@@ -582,7 +582,7 @@ class Room:
                         break
                 except OSError:
                     if time.monotonic() >= deadline:
-                        raise RuntimeError("Game server did not listen within 30 seconds:\n" + "\n".join(server.log))
+                        raise RuntimeError("Game server did not listen within 300 seconds:\n" + "\n".join(server.log))
                     time.sleep(0.1)
         except BaseException:
             server.stop()
