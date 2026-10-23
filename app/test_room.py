@@ -151,6 +151,79 @@ class EditorTests(unittest.TestCase):
                 self.plan(players)
 
 
+class OptionsSchemaProgressTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="options schema ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.engine = self.root / "engine"
+        self.engine.mkdir()
+        self.room = site.Room({"graph": {"seed": "S1", "players": []}}, str(self.engine), 0, root=self.root)
+        self.sent = []
+        self.room.broadcast = lambda message, admin_only=False: self.sent.append((message, admin_only))
+
+    def fake_script(self, body):
+        folder = self.root / "app"
+        folder.mkdir(exist_ok=True)
+        (folder / "options_schema.py").write_text("import json, sys, time\n" + body)
+        patcher = patch.object(site, "DIR", str(folder))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_real_script_reports_every_world_and_game(self):
+        (self.engine / "Options.py").write_text(
+            "class Visibility:\n    simple_ui = 1\n    complex_ui = 2\n"
+            "def get_option_groups(world, visibility):\n    return {}\n")
+        worlds = self.engine / "worlds"
+        for name in ("alpha", "beta", "_helpers"):
+            (worlds / name).mkdir(parents=True)
+            (worlds / name / "__init__.py").write_text("")
+        (worlds / "__init__.py").write_text(
+            "import importlib, types\n"
+            "for name in ('alpha', 'beta'):\n    importlib.import_module('.' + name, 'worlds')\n"
+            "importlib.import_module('._helpers', 'worlds')\n"
+            "AutoWorldRegister = types.SimpleNamespace(world_types={\n"
+            "    'Alpha': types.SimpleNamespace(hidden=False), 'Beta': types.SimpleNamespace(hidden=False),\n"
+            "    'Hidden': types.SimpleNamespace(hidden=True)})\n")
+        self.room.SCHEMA_UPDATE_INTERVAL = 0
+        self.assertEqual(sorted(self.room.options_schema()), ["Alpha", "Beta"])
+        steps = [(m["stage"], m["done"], m["total"], m["label"]) for m, admin in self.sent]
+        self.assertTrue(all(admin for _, admin in self.sent))
+        self.assertEqual(steps, [
+            ("starting", 0, 0, ""), ("starting", 0, 0, ""),
+            ("worlds", 0, 2, ""), ("worlds", 1, 2, "alpha"), ("worlds", 2, 2, "beta"),
+            ("options", 1, 2, "Alpha"), ("options", 2, 2, "Beta"), ("saving", 2, 2, "")])
+        self.sent.clear()
+        self.room.options_schema()
+        self.assertEqual(self.sent, [], "a cached schema loads without progress messages")
+
+    def test_progress_is_throttled_but_stage_changes_and_the_last_step_get_through(self):
+        self.fake_script(
+            "for i in range(1, 51):\n"
+            "    print('PROGRESS ' + json.dumps({'stage': 'worlds', 'done': i, 'total': 50, 'label': str(i)}))\n"
+            "print('PROGRESS ' + json.dumps({'stage': 'options', 'done': 1, 'total': 2, 'label': 'A'}))\n"
+            "print('PROGRESS ' + json.dumps({'stage': 'options', 'done': 2, 'total': 2, 'label': 'B'}))\n"
+            "json.dump({'games': {'A': {}, 'B': {}}}, open(sys.argv[1], 'w'))\n")
+        self.room.SCHEMA_UPDATE_INTERVAL = 100
+        self.room.options_schema()
+        steps = [(m["stage"], m["done"]) for m, _ in self.sent]
+        self.assertEqual(steps, [("starting", 0), ("worlds", 1), ("options", 1), ("options", 2)])
+
+    def test_failure_reports_output_without_progress_lines(self):
+        self.fake_script("print('PROGRESS {\"stage\": \"starting\"}')\n"
+                         "print('Skipping Broken: boom', file=sys.stderr)\nsys.exit(1)\n")
+        with self.assertRaises(RuntimeError) as raised:
+            self.room.options_schema()
+        self.assertIn("Skipping Broken: boom", str(raised.exception))
+        self.assertNotIn("PROGRESS", str(raised.exception))
+
+    def test_timeout_kills_the_script(self):
+        self.fake_script("time.sleep(30)\n")
+        self.room.SCHEMA_TIMEOUT = 0.5
+        with self.assertRaises(site.subprocess.TimeoutExpired):
+            self.room.options_schema()
+
+
 class RoomSocketTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="room socket ")

@@ -98,6 +98,7 @@
   #room { border-color:var(--useful); }
   #room.error { border-color:#ff927e; }
   #room .bar div { background:var(--useful); transition:width .3s; }
+  #ed-loading .bar div { background:var(--useful); transition:width .3s; }
   #room-error { color:#ff927e; white-space:pre-wrap; font:12px/1.35 ui-monospace, Menlo, monospace; max-height:220px; overflow:auto; }
   #gen-log { max-height:180px; overflow-y:auto; background:#0d0f14; padding:8px; font:12px/1.35 ui-monospace, Menlo, monospace; white-space:pre-wrap; margin:8px 0 0; }
   main.editing > :not(#editor):not(#room) { display:none; }
@@ -158,14 +159,12 @@
       <button id="ed-cancel" class="act">Cancel</button>
       <button id="ed-save" class="act primary">Save &amp; start new seed…</button>
     </div>
-    <p class="dim">Unchecked: normal randomized placement, without an extra cross-player preference. Game rules still apply. This setting applies to the next seed only.</p>
     <div class="toolbar">
       <label for="left-interval" title="When a player's card has &quot;Player has left&quot; checked, one of their remaining checks that rewards another player is unlocked every this many seconds.">
         Unlock interval for players who have left (seconds)</label>
       <input type="number" id="left-interval" min="1" max="3600" step="1" value="60" style="width:110px">
       <span id="left-interval-status" class="dim" role="status"></span>
     </div>
-    <p class="dim">1 second to 1 hour. Saved and applied immediately to the running seed; no new seed is needed.</p>
     <p id="ed-error" class="ed-error" role="alert"></p>
     <fieldset id="ed-fields" style="border:0;padding:0;margin:0"><div class="ed-cards" id="ed-cards"></div></fieldset>
   </section>
@@ -611,6 +610,7 @@ function connectSocket() {
     const message = JSON.parse(event.data);
     if (message.type === "state") showRoom(message);
     else if (message.type === "log") appendLog(message.lines);
+    else if (message.type === "schema") showLoadProgress(message);
     else if (message.type === "reload") { showSuccess = true; reloadSeed(); }
   };
   ws.onclose = () => setTimeout(connectSocket, 2000);
@@ -676,6 +676,23 @@ async function schemaFor(game) {
   return schemaRequests[game];
 }
 
+// Loading the editor: the server streams "schema" progress while it reads every installed game (cache misses only).
+const LOAD_STAGES = {starting: [0, .05], worlds: [.05, .55], options: [.55, .9], saving: [.9, .95], players: [.95, 1]};
+let editorLoading = false;
+
+function showLoadProgress({stage, done = 0, total = 0, label = ""}) {
+  if (!editorLoading || !(stage in LOAD_STAGES)) return;
+  const [from, to] = LOAD_STAGES[stage], count = total ? ` ${done}/${total}` : "", name = label ? `: ${label}` : "";
+  $("ed-loading-bar").style.width = `${(100 * (from + (to - from) * (total ? Math.min(done / total, 1) : 0))).toFixed(1)}%`;
+  $("ed-loading-label").textContent = {
+    starting: "Starting Archipelago…",
+    worlds: `Loading worlds${count}${name}`,
+    options: `Reading game options${count}${name}`,
+    saving: "Saving the game list…",
+    players: `Loading players' settings${count}`,
+  }[stage];
+}
+
 $("edit-open").onclick = async () => {
   $("main").classList.add("editing");
   $("editor").hidden = false;
@@ -683,7 +700,10 @@ $("edit-open").onclick = async () => {
   // Until players and games are loaded, adding a player would silently do nothing.
   $("ed-add").disabled = true;
   $("ed-add").title = "Loading the installed games…";
-  $("ed-cards").innerHTML = '<p class="dim">Loading players and game settings… (the first time this reads every installed game and can take a few seconds)</p>';
+  $("ed-cards").innerHTML = '<div id="ed-loading"><p id="ed-loading-label">Loading players and game settings…</p>'
+    + '<div class="bar"><div id="ed-loading-bar" style="width:0"></div></div>'
+    + '<p class="dim">The first time this reads every installed game and can take a while.</p></div>';
+  editorLoading = true;
   try {
     const [config, games] = await Promise.all([getJSON("/api/config"), getJSON("/api/games")]);
     editor = {games, players: config.players.map(p => ({...p, origGame: p.game, origName: p.name, set: {}, unset: new Set(),
@@ -694,9 +714,15 @@ $("edit-open").onclick = async () => {
     $("left-interval-status").textContent = "";
     $("ed-add").disabled = false;
     $("ed-add").title = "";
-    await Promise.all(editor.players.map(p => p.editable && schemaFor(p.game)));
+    const editable = editor.players.filter(p => p.editable);
+    let loaded = 0;
+    showLoadProgress({stage: "players", done: 0, total: editable.length});
+    await Promise.all(editable.map(p => schemaFor(p.game)
+      .then(() => showLoadProgress({stage: "players", done: ++loaded, total: editable.length}))));
+    editorLoading = false;
     renderEditor();
   } catch (error) {
+    editorLoading = false;
     $("ed-cards").innerHTML = "";
     $("ed-error").textContent = error.message;
   }

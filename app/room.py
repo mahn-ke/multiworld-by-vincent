@@ -545,14 +545,59 @@ class Room:
             if not cache.is_file():
                 cache.parent.mkdir(exist_ok=True)
                 temporary = cache.with_suffix(".tmp")
-                result = subprocess.run([sys.executable, os.path.join(DIR, "options_schema.py"), str(temporary)],
-                                        cwd=self.engine, env={**os.environ, "SKIP_REQUIREMENTS_UPDATE": "1"},
-                                        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
-                if result.returncode or not temporary.is_file():
-                    raise RuntimeError("Could not read game options:\n" + result.stdout[-3000:] + result.stderr[-3000:])
+                self.read_options(temporary)
                 temporary.replace(cache)
             self.schema = (signature, json.loads(cache.read_text())["games"])
             return self.schema[1]
+
+    SCHEMA_TIMEOUT = 300
+    SCHEMA_UPDATE_INTERVAL = 0.25
+
+    def read_options(self, output):
+        """Runs options_schema.py, relaying its progress to admins at most every SCHEMA_UPDATE_INTERVAL seconds."""
+        last = {"stage": None, "sent": 0.0, "step": None}
+
+        def report(step, force=False):
+            now = time.monotonic()
+            if force or step["stage"] != last["stage"] or now - last["sent"] >= self.SCHEMA_UPDATE_INTERVAL:
+                last.update(stage=step["stage"], sent=now, step=step)
+                self.broadcast({"type": "schema", **step}, admin_only=True)
+
+        report({"stage": "starting", "done": 0, "total": 0, "label": ""}, force=True)
+        process = subprocess.Popen([sys.executable, os.path.join(DIR, "options_schema.py"), str(output)],
+                                   cwd=self.engine, env={**os.environ, "SKIP_REQUIREMENTS_UPDATE": "1"},
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, errors="replace")
+        killed = threading.Event()
+
+        def kill():
+            killed.set()
+            process.kill()
+
+        timer = threading.Timer(self.SCHEMA_TIMEOUT, kill)
+        timer.start()
+        messages, step = collections.deque(maxlen=200), None
+        try:
+            for line in process.stdout:
+                if line.startswith("PROGRESS "):
+                    try:
+                        step = json.loads(line[len("PROGRESS "):])
+                    except ValueError:
+                        messages.append(line)
+                        continue
+                    report(step)
+                else:
+                    messages.append(line)
+            process.wait()
+        finally:
+            timer.cancel()
+            process.stdout.close()
+        if killed.is_set():
+            raise subprocess.TimeoutExpired(process.args, self.SCHEMA_TIMEOUT)
+        if step is not None and step is not last["step"]:
+            report(step, force=True)
+        if process.returncode or not output.is_file():
+            raise RuntimeError("Could not read game options:\n" + "".join(messages)[-6000:])
 
     # -- seed lifecycle
     def idle(self):

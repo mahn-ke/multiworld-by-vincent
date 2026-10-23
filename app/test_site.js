@@ -325,3 +325,33 @@ test("Add player is disabled while the editor loads and adds a card at once on t
   finishOptions({options: []});
   await adding;
 });
+
+test("the editor shows a progress bar with named steps while the server reads every game", async () => {
+  const ui = setup();
+  let finishGames;
+  const games = new Promise(resolve => finishGames = resolve);
+  ui.run(`fetch = async url => ({ok: true, json: async () =>
+    url === "/api/config" ? {players: [{name: "A", game: "Peglin", editable: true, options: {}},
+                                      {name: "B", game: "Locked", editable: false, options: {}}],
+                            prefer_other_players: true, left_player_interval: 60}
+    : url === "/api/games" ? globalThis.games : {options: []}})`);
+  ui.run("globalThis").games = games;
+  const opening = ui.run(`document.querySelector = () => null; $("edit-open").onclick()`);
+  assert.match(ui.element("ed-cards").innerHTML, /id="ed-loading-bar"/);
+  const bar = ui.element("ed-loading-bar"), label = ui.element("ed-loading-label");
+  ui.run(`showLoadProgress({stage: "worlds", done: 37, total: 85, label: "pokemon_emerald"})`);
+  assert.equal(label.textContent, "Loading worlds 37/85: pokemon_emerald");
+  assert.equal(bar.style.width, `${(100 * (.05 + .5 * 37 / 85)).toFixed(1)}%`);
+  ui.run(`showLoadProgress({stage: "options", done: 83, total: 83, label: "Peglin"})`);
+  assert.equal(label.textContent, "Reading game options 83/83: Peglin");
+  assert.equal(bar.style.width, "90.0%");
+  ui.run(`showLoadProgress({stage: "saving", done: 83, total: 83})`);
+  assert.equal(label.textContent, "Saving the game list…");
+  finishGames(["Peglin"]);
+  await opening;
+  assert.equal(label.textContent, "Loading players' settings 1/1");
+  assert.equal(bar.style.width, "100.0%");
+  // Late messages after loading finished must not touch the editor.
+  ui.run(`showLoadProgress({stage: "worlds", done: 1, total: 85, label: "x"})`);
+  assert.equal(label.textContent, "Loading players' settings 1/1");
+});
