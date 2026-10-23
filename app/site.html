@@ -386,8 +386,14 @@ function drawCards() {
     const st = status.players[p.slot] || {checked: []};
     const n = st.checked.length, pct = p.locations ? 100 * n / p.locations : 0;
     const address = esc(gameAddress());
+    const minecraftAddress = gameAddress().replace(/^wss?:\/\//, "").replace(/:(\d+)$/, " $1");
+    const minecraftData = p.game === "Minecraft"
+      ? status.downloads?.find(d => d.endsWith(".apmc") && d.includes(`_P${p.slot}_`)) : null;
     const how = p.game === "Peglin" ? `Options → Multiworld: <code>${status.server.address ? "wss" : "ws"}://${address}</code>, slot <code>${esc(p.name)}</code>`
       : p.game.startsWith("Pokemon") ? `Patch: <a href="/download/${encodeURIComponent(status.downloads.find(d => d.includes("_P" + p.slot + "_")) || "")}">download</a>, then BizHawk + client → <code>${address}</code>`
+      : p.game === "Minecraft" ? minecraftData
+        ? `Download <a href="/download/${encodeURIComponent(minecraftData)}">Minecraft data file</a> (.apmc), open it, then join its local Forge server and run <code>/connect ${esc(minecraftAddress)}</code>.`
+        : `Minecraft data file (.apmc) will be available after a seed containing this slot is generated. Connect slot <code>${esc(p.name)}</code> to <code>${address}</code>.`
       : `Connect slot <code>${esc(p.name)}</code> to <code>${address}</code>`;
     const rows = (checks[p.slot] || []).map(check => {
       const done = st.checked.includes(check.id);

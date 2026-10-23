@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import tempfile
 import threading
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -79,6 +80,28 @@ class ChecklistTests(unittest.TestCase):
         self.context["server"].running = False
         self.assertEqual(self.request({"slot": 1, "location": 42})[0], 503)
         self.assertEqual(self.commands, [])
+
+
+class DownloadTests(unittest.TestCase):
+    def test_minecraft_data_file_is_publicly_downloadable(self):
+        temporary = tempfile.TemporaryDirectory(prefix="room download ")
+        self.addCleanup(temporary.cleanup)
+        name = "AP_test_P1_Player.apmc"
+        archive_path = Path(temporary.name) / "seed.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr(name, b"minecraft data")
+        context = {"downloads": [name], "zip": str(archive_path)}
+        server = site.WebServer(("127.0.0.1", 0), site.make_handler(context))
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+
+        with urlopen(f"http://127.0.0.1:{server.server_port}/download/{name}") as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"minecraft data")
+            self.assertIn(name, response.headers["Content-Disposition"])
 
 
 YAML = b"""# keep me

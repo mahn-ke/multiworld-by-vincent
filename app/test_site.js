@@ -156,6 +156,23 @@ test("a public game address replaces host and port, and an empty room says so", 
   assert.equal(ui.element("srv").disabled, true);
 });
 
+test("Minecraft cards link the matching slot data file and show the separate connect port", async () => {
+  const ui = setup();
+  await ui.run("loadSeed()");
+  ui.run("document.querySelectorAll = () => []");
+  ui.run(`graph.players.push({slot: 3, name: "C", game: "Minecraft", locations: 0}); checks["3"] = [];
+    status = {admin: false, server: {running: true, lan: "192.0.2.10", port: 38286,
+      address: "wss://multiworld.by.vincent.mahn.ke:443"}, players: {},
+      downloads: ["AP_test_P1_A.apmc", "AP_test_P3_C.apmc"]}; drawCards();`);
+  assert.match(ui.element("cards").innerHTML,
+    /Download <a href="\/download\/AP_test_P3_C\.apmc">Minecraft data file<\/a> \(\.apmc\), open it, then join its local Forge server and run <code>\/connect multiworld\.by\.vincent\.mahn\.ke 443<\/code>/);
+  assert.doesNotMatch(ui.element("cards").innerHTML, /\/download\/AP_test_P1_A\.apmc/);
+
+  ui.run(`status.downloads = ["AP_test_P1_A.apmc"]; cardSignature = null; drawCards();`);
+  assert.match(ui.element("cards").innerHTML, /Minecraft data file \(\.apmc\) will be available after a seed containing this slot is generated/);
+  assert.doesNotMatch(ui.element("cards").innerHTML, /href="\/download\/"/);
+});
+
 test("an empty room shows no players and no distribution table", async () => {
   const ui = setup();
   ui.graph.players = [];

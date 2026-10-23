@@ -83,6 +83,13 @@ in the seed, not just progression required by a goal. **Path to the goal** is
 hidden when all goals are already satisfied without items, as with the
 no-logic Pathogenic and Peglin worlds. Actual unreachable goals remain visible.
 
+Minecraft player cards link to that slot's generated `.apmc` data file when
+the seed includes one. Open the file to launch its local Forge server, join
+that server in Minecraft, then use the displayed `/connect` command to connect
+to the multiworld server. The link is available to visitors without signing
+in. The download appears only after generating a seed that includes the
+Minecraft slot.
+
 The host's console and check buttons are only available through localhost.
 Activity uses the full width when the host console is hidden. The header's
 **Downloads: Spoiler Log** link downloads the seed's spoiler text and appears
