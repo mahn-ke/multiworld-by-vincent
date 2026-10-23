@@ -72,7 +72,8 @@ original_import_module = importlib.import_module
 importlib.import_module = observer.import_module(original_import_module)
 sys.meta_path.insert(0, observer)
 try:
-    from worlds import AutoWorldRegister, ensure_worlds_loaded  # noqa: E402
+    from worlds import AutoWorldRegister  # noqa: E402
+    ensure_worlds_loaded = getattr(sys.modules["worlds"], "ensure_worlds_loaded", None)
 finally:
     sys.meta_path.remove(observer)
     importlib.import_module = original_import_module
@@ -131,7 +132,8 @@ def main():
     importlib.import_module = observer.import_module(original_import_module)
     sys.meta_path.insert(0, observer)
     try:
-        ensure_worlds_loaded()
+        if ensure_worlds_loaded is not None:
+            ensure_worlds_loaded()
     finally:
         sys.meta_path.remove(observer)
         importlib.import_module = original_import_module
