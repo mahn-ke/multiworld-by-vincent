@@ -222,7 +222,8 @@ its worlds; the room allows up to five minutes before reporting a startup failur
   a restart the latest seed is hosted again with its progress.
 - Players connect their game clients to **`multiworld.by.vincent.mahn.ke:443`**.
   The website forwards WebSocket connections on any path except `/ws` to the
-  game server, so only the HTTPS port is published. Clients must use
+  game server using an HTTP/1.1 handshake even if the TLS proxy forwards
+  HTTP/1.0, so only the HTTPS port is published. Clients must use
   `wss://` (most try it first; Peglin needs `wss://` explicitly).
 - Login uses the Keycloak client provisioned for the repository (`OAUTH_URL`,
   `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`). Inside the container localhost is

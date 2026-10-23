@@ -911,7 +911,8 @@ def make_handler(ctx):
                 return self._send("The game server is not reachable", "text/plain", 502)
             upstream.settimeout(None)
             self.close_connection = True
-            head = f"{self.command} {self.path} {self.request_version}\r\n" + "".join(
+            # Reverse proxies may forward HTTP/1.0, but the upstream WebSocket handshake requires HTTP/1.1.
+            head = f"{self.command} {self.path} HTTP/1.1\r\n" + "".join(
                 f"{key}: {value}\r\n" for key, value in self.headers.items()) + "\r\n"
             try:
                 upstream.sendall(head.encode("latin-1"))

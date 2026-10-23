@@ -233,6 +233,22 @@ class HostingTests(unittest.TestCase):
                     first = await client.recv()
                     await client.send("x" * 200000)
                     second = await client.recv()
+                reader, writer = await asyncio.open_connection("127.0.0.1", web)
+                writer.write((
+                    "GET /game HTTP/1.0\r\n"
+                    f"Host: 127.0.0.1:{web}\r\n"
+                    "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    "Sec-WebSocket-Version: 13\r\n"
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+                ).encode())
+                await writer.drain()
+                handshake = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+                self.assertTrue(handshake.startswith(b"HTTP/1.1 101 "), handshake)
+                writer.write(b"\x88\x80\x00\x00\x00\x00")
+                await writer.drain()
+                await asyncio.wait_for(reader.read(1024), timeout=5)
+                writer.close()
+                await writer.wait_closed()
                 running.running = False
                 with self.assertRaises(websockets.InvalidStatus):
                     async with connect(f"ws://127.0.0.1:{web}/"):
